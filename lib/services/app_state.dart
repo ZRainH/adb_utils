@@ -74,8 +74,9 @@ class AppState extends ChangeNotifier {
   String? updateDownloadPath;
   String? updateDownloadError;
   Timer? _pollTimer;
+  bool _refreshingDevices = false;
 
-  static const appVersion = '1.0.0';
+  static const appVersion = '1.0.1';
   static const githubRepo = 'ZRainH/adb_utils';
 
   ThemeMode get themeMode => switch (settings.themePref) {
@@ -170,11 +171,155 @@ class AppState extends ChangeNotifier {
 
   void _syncPollTimer() {
     _pollTimer?.cancel();
-    final secs = settings.devicePollSeconds;
-    if (secs <= 0) return;
-    _pollTimer = Timer.periodic(Duration(seconds: secs), (_) {
-      unawaited(refreshDevices());
-    });
+    _pollTimer = null;
+    final secs = settings.devicePollSeconds <= 0 ? 2 : settings.devicePollSeconds;
+    try {
+      _pollTimer = Timer.periodic(Duration(seconds: secs), (_) {
+        unawaited(refreshDevices(quiet: true));
+      });
+    } catch (e, st) {
+      debugPrint('[设备轮询] 启动失败: $e\n$st');
+    }
+  }
+
+  /// Update poll interval without rebuilding the whole app (avoids Windows crashes).
+  Future<void> setDevicePollSeconds(int seconds) async {
+    final next = seconds <= 0 ? 2 : seconds;
+    if (settings.devicePollSeconds == next) return;
+    settings.devicePollSeconds = next;
+    _syncPollTimer();
+    try {
+      await SettingsStore.instance.save(settings);
+    } catch (e) {
+      debugPrint('[设置] 保存轮询失败: $e');
+    }
+  }
+
+  Future<void> _enrichDevices() async {
+    try {
+      final full = await adb.listDevices(enrich: true);
+      if (full.isEmpty) return;
+      final byId = {for (final d in full) d.id: d};
+      final next = [for (final d in devices) byId[d.id] ?? d];
+      final same = next.length == devices.length &&
+          List.generate(
+            next.length,
+            (i) =>
+                next[i].id == devices[i].id &&
+                next[i].name == devices[i].name &&
+                next[i].battery == devices[i].battery,
+          ).every((e) => e);
+      if (same) return;
+      devices = next;
+      if (selectedDevice != null) {
+        selectedDevice = byId[selectedDevice!.id] ?? selectedDevice;
+      }
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[设备信息] 补充失败: $e');
+    }
+  }
+
+  Future<void> selectDevice(DeviceInfo device) async {
+    selectedDevice = device;
+    if (settings.rememberLastDevice) {
+      settings.lastDeviceId = device.id;
+      unawaited(SettingsStore.instance.save(settings));
+    }
+    notifyListeners();
+    await Future.wait([refreshMetrics(), refreshDeviceFlags()]);
+  }
+
+  Future<void> refreshDevices({bool quiet = false}) async {
+    if (_refreshingDevices) return;
+    _refreshingDevices = true;
+    var changed = !quiet;
+    if (!quiet) {
+      loadingDevices = true;
+      lastError = null;
+      notifyListeners();
+    }
+    try {
+      adbAvailable = await adb.isAvailable();
+      if (!adbAvailable) {
+        changed = devices.isNotEmpty || selectedDevice != null;
+        devices = const [];
+        selectedDevice = null;
+        storage = StorageMetrics.empty;
+        memory = MemoryMetrics.empty;
+        lastError = '未检测到 adb。请在设置中指定 platform-tools 路径。';
+        return;
+      }
+
+      final previousIds = devices.map((d) => d.id).toSet();
+      final listed = await adb.listDevices(enrich: !quiet);
+      if (quiet) {
+        final byId = {for (final d in devices) d.id: d};
+        devices = [
+          for (final d in listed)
+            byId[d.id]?.copyWith(connection: d.connection) ?? d,
+        ];
+      } else {
+        devices = listed;
+      }
+      changed = previousIds.length != devices.length ||
+          !previousIds.containsAll(devices.map((d) => d.id));
+
+      if (devices.isEmpty) {
+        selectedDevice = null;
+        storage = StorageMetrics.empty;
+        memory = MemoryMetrics.empty;
+        lastError = '未连接设备。请开启 USB 调试并授权本机。';
+      } else {
+        lastError = null;
+        DeviceInfo? next;
+        if (settings.rememberLastDevice && settings.lastDeviceId.isNotEmpty) {
+          final remembered =
+              devices.where((d) => d.id == settings.lastDeviceId).toList();
+          if (remembered.isNotEmpty) next = remembered.first;
+        }
+        if (next == null && selectedDevice != null) {
+          final still =
+              devices.where((d) => d.id == selectedDevice!.id).toList();
+          if (still.isNotEmpty) next = still.first;
+        }
+        if (next == null && settings.autoSelectOnConnect) {
+          next = devices.first;
+        }
+        final prevId = selectedDevice?.id;
+        selectedDevice = next ?? devices.first;
+        if (prevId != selectedDevice?.id) changed = true;
+        if (settings.rememberLastDevice) {
+          settings.lastDeviceId = selectedDevice!.id;
+          unawaited(SettingsStore.instance.save(settings));
+        }
+      }
+
+      if (quiet && changed) {
+        unawaited(_enrichDevices());
+      }
+      if (selectedDevice != null && (!quiet || changed)) {
+        await Future.wait([refreshMetrics(), refreshDeviceFlags()]);
+      }
+    } catch (e) {
+      if (!quiet) {
+        changed = true;
+        devices = const [];
+        selectedDevice = null;
+        storage = StorageMetrics.empty;
+        memory = MemoryMetrics.empty;
+        lastError = e.toString();
+      } else {
+        debugPrint('[设备轮询] $e');
+      }
+    } finally {
+      _refreshingDevices = false;
+      if (!quiet) loadingDevices = false;
+      // Quiet polls only rebuild UI when the device set actually changed.
+      if (!quiet || changed) {
+        notifyListeners();
+      }
+    }
   }
 
   void setNav(int index) {
@@ -217,73 +362,6 @@ class AppState extends ChangeNotifier {
     if (dbPackageFilter == null) return;
     dbPackageFilter = null;
     notifyListeners();
-  }
-
-  Future<void> selectDevice(DeviceInfo device) async {
-    selectedDevice = device;
-    if (settings.rememberLastDevice) {
-      settings.lastDeviceId = device.id;
-      unawaited(SettingsStore.instance.save(settings));
-    }
-    notifyListeners();
-    await Future.wait([refreshMetrics(), refreshDeviceFlags()]);
-  }
-
-  Future<void> refreshDevices() async {
-    loadingDevices = true;
-    lastError = null;
-    notifyListeners();
-    try {
-      adbAvailable = await adb.isAvailable();
-      if (!adbAvailable) {
-        devices = const [];
-        selectedDevice = null;
-        storage = StorageMetrics.empty;
-        memory = MemoryMetrics.empty;
-        lastError = '未检测到 adb。请在设置中指定 platform-tools 路径。';
-        return;
-      }
-
-      devices = await adb.listDevices();
-      if (devices.isEmpty) {
-        selectedDevice = null;
-        storage = StorageMetrics.empty;
-        memory = MemoryMetrics.empty;
-        lastError = '未连接设备。请开启 USB 调试并授权本机。';
-      } else {
-        DeviceInfo? next;
-        if (settings.rememberLastDevice && settings.lastDeviceId.isNotEmpty) {
-          final remembered =
-              devices.where((d) => d.id == settings.lastDeviceId).toList();
-          if (remembered.isNotEmpty) next = remembered.first;
-        }
-        if (next == null && selectedDevice != null) {
-          final still = devices.where((d) => d.id == selectedDevice!.id).toList();
-          if (still.isNotEmpty) next = still.first;
-        }
-        if (next == null && settings.autoSelectOnConnect) {
-          next = devices.first;
-        }
-        selectedDevice = next ?? devices.first;
-        if (settings.rememberLastDevice) {
-          settings.lastDeviceId = selectedDevice!.id;
-          unawaited(SettingsStore.instance.save(settings));
-        }
-      }
-    } catch (e) {
-      devices = const [];
-      selectedDevice = null;
-      storage = StorageMetrics.empty;
-      memory = MemoryMetrics.empty;
-      lastError = e.toString();
-    } finally {
-      loadingDevices = false;
-      notifyListeners();
-    }
-
-    if (selectedDevice != null) {
-      await Future.wait([refreshMetrics(), refreshDeviceFlags()]);
-    }
   }
 
   Future<void> refreshMetrics() async {
@@ -780,10 +858,20 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> updateSettings(void Function(AppSettings s) fn) async {
+    final prevTheme = settings.themePref;
     fn(settings);
-    _applyThemeColors();
+    if (settings.devicePollSeconds <= 0) {
+      settings.devicePollSeconds = 2;
+    }
+    if (settings.themePref != prevTheme) {
+      _applyThemeColors();
+    }
     _syncPollTimer();
-    await persist();
+    await SettingsStore.instance.save(settings);
+    // Defer notify: rebuilding while a Dropdown menu is open crashes on Windows.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      notifyListeners();
+    });
   }
 
   void previewSettings(void Function(AppSettings s) fn) {

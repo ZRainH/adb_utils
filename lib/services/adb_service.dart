@@ -110,7 +110,7 @@ class AdbService {
     }
   }
 
-  Future<List<DeviceInfo>> listDevices() async {
+  Future<List<DeviceInfo>> listDevices({bool enrich = true}) async {
     final result = await _run(['devices', '-l']);
     if (result.exitCode != 0) {
       throw AdbException(
@@ -127,41 +127,54 @@ class AdbService {
 
     final devices = <DeviceInfo>[];
     for (final line in lines) {
-      final parts = line.trim().split(RegExp(r'\s+'));
-      if (parts.length < 2) continue;
-      final id = parts[0];
-      final state = parts[1];
-      if (state != 'device') continue;
-
-      String? model;
-      String? product;
-      String? deviceName;
-      for (final p in parts.skip(2)) {
-        if (p.startsWith('model:')) model = p.substring(6).replaceAll('_', ' ');
-        if (p.startsWith('product:')) product = p.substring(8);
-        if (p.startsWith('device:')) deviceName = p.substring(7);
+      final parsed = _parseDevicesLine(line);
+      if (parsed == null) continue;
+      if (!enrich) {
+        devices.add(parsed);
+        continue;
       }
 
-      final displayName = model ?? product ?? deviceName ?? id;
-      final isTcp = id.contains(':') && RegExp(r'^\d').hasMatch(id);
-      final battery = await _readBattery(id);
-      final props = await _readDeviceProps(id);
-
+      final battery = await _readBattery(parsed.id);
+      final props = await _readDeviceProps(parsed.id);
       devices.add(
-        DeviceInfo(
-          id: id,
-          name: props['ro.product.model'] ?? displayName,
-          model: props['ro.product.model'] ?? model,
-          connection: isTcp ? ConnectionType.tcpip : ConnectionType.usb,
+        parsed.copyWith(
+          name: props['ro.product.model'] ?? parsed.name,
+          model: props['ro.product.model'] ?? parsed.model,
           battery: battery,
           isTablet: _looksLikeTablet(
             props['ro.build.characteristics'] ?? '',
-            props['ro.product.model'] ?? displayName,
+            props['ro.product.model'] ?? parsed.name,
           ),
         ),
       );
     }
     return devices;
+  }
+
+  DeviceInfo? _parseDevicesLine(String line) {
+    final parts = line.trim().split(RegExp(r'\s+'));
+    if (parts.length < 2) return null;
+    final id = parts[0];
+    final state = parts[1];
+    if (state != 'device') return null;
+
+    String? model;
+    String? product;
+    String? deviceName;
+    for (final p in parts.skip(2)) {
+      if (p.startsWith('model:')) model = p.substring(6).replaceAll('_', ' ');
+      if (p.startsWith('product:')) product = p.substring(8);
+      if (p.startsWith('device:')) deviceName = p.substring(7);
+    }
+
+    final displayName = model ?? product ?? deviceName ?? id;
+    final isTcp = id.contains(':') && RegExp(r'^\d').hasMatch(id);
+    return DeviceInfo(
+      id: id,
+      name: displayName,
+      model: model,
+      connection: isTcp ? ConnectionType.tcpip : ConnectionType.usb,
+    );
   }
 
   bool _looksLikeTablet(String characteristics, String model) {

@@ -18,7 +18,7 @@ class AppSettings {
     this.rememberLastDevice = true,
     this.lastDeviceId = '',
     this.autoSelectOnConnect = true,
-    this.devicePollSeconds = 0,
+    this.devicePollSeconds = 2,
     this.logcatBufferSize = 3000,
     this.defaultLogLevel,
     this.dbRefreshMode = DbRefreshPref.off,
@@ -71,6 +71,7 @@ class AppSettings {
         'lastDeviceId': lastDeviceId,
         'autoSelectOnConnect': autoSelectOnConnect,
         'devicePollSeconds': devicePollSeconds,
+        'devicePollMigratedV2': true,
         'logcatBufferSize': logcatBufferSize,
         'defaultLogLevel': defaultLogLevel,
         'dbRefreshMode': dbRefreshMode.name,
@@ -96,7 +97,13 @@ class AppSettings {
       rememberLastDevice: json['rememberLastDevice'] as bool? ?? true,
       lastDeviceId: json['lastDeviceId'] as String? ?? '',
       autoSelectOnConnect: json['autoSelectOnConnect'] as bool? ?? true,
-      devicePollSeconds: json['devicePollSeconds'] as int? ?? 0,
+      devicePollSeconds: () {
+        final v = json['devicePollSeconds'] as int?;
+        // Legacy default was 0 (off). Enable realtime-friendly polling by default.
+        if (v == null) return 2;
+        if (v == 0 && json['devicePollMigratedV2'] != true) return 2;
+        return v;
+      }(),
       logcatBufferSize: json['logcatBufferSize'] as int? ?? 3000,
       defaultLogLevel: _validLogLevel(json['defaultLogLevel'] as String?),
       dbRefreshMode: DbRefreshPref.values.firstWhere(

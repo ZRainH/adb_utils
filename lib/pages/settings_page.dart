@@ -41,7 +41,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _patch(void Function(AppSettings s) fn) async {
     await widget.state.updateSettings(fn);
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
@@ -108,19 +111,7 @@ class _SettingsPageState extends State<SettingsPage> {
             s.autoSelectOnConnect,
             (v) => _patch((s) => s.autoSelectOnConnect = v),
           ),
-          _dropdown<int>(
-            '设备轮询',
-            s.devicePollSeconds,
-            const [
-              (0, '关闭'),
-              (5, '每 5 秒'),
-              (10, '每 10 秒'),
-              (30, '每 30 秒'),
-            ],
-            (v) => _patch((s) {
-              s.devicePollSeconds = v;
-            }),
-          ),
+          _pollIntervalPicker(s),
         ]),
         _section('日志与数据库', [
           _dropdown<int>(
@@ -358,6 +349,49 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  Widget _pollIntervalPicker(AppSettings s) {
+    const options = <(int, String)>[
+      (2, '2 秒'),
+      (5, '5 秒'),
+      (10, '10 秒'),
+      (30, '30 秒'),
+    ];
+    final current = s.devicePollSeconds <= 0 ? 2 : s.devicePollSeconds;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '设备轮询',
+            style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '自动检测设备插拔。切换间隔不会重建整个窗口。',
+            style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final option in options)
+                ChoiceChip(
+                  label: Text(option.$2),
+                  selected: current == option.$1,
+                  onSelected: (_) async {
+                    await widget.state.setDevicePollSeconds(option.$1);
+                    if (mounted) setState(() {});
+                  },
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _toggle(
     String title,
     String subtitle,
@@ -404,7 +438,11 @@ class _SettingsPageState extends State<SettingsPage> {
                     DropdownMenuItem(value: item.$1, child: Text(item.$2)),
                 ],
                 onChanged: (v) {
-                  if (v != null) onChanged(v);
+                  if (v == null) return;
+                  // Wait until the menu overlay closes — sync rebuild exits on Windows.
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    onChanged(v);
+                  });
                 },
               ),
             ),
