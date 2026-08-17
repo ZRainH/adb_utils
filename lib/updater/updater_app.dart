@@ -109,6 +109,12 @@ class _UpdaterPageState extends State<UpdaterPage> {
       await _waitForProcess(args.waitPid);
 
       setState(() {
+        _status = '释放被占用的文件…';
+        _progress = 0.04;
+      });
+      await _releaseLockedBinaries(args.installDir);
+
+      setState(() {
         _status = '正在安装文件…';
         _progress = 0.05;
       });
@@ -153,6 +159,24 @@ class _UpdaterPageState extends State<UpdaterPage> {
         _status = '更新失败';
       });
     }
+  }
+
+  /// Stop adb server / leftover processes that lock platform-tools\*.exe.
+  Future<void> _releaseLockedBinaries(String installDir) async {
+    final adb = File(
+      '$installDir${Platform.pathSeparator}platform-tools${Platform.pathSeparator}adb.exe',
+    );
+    if (adb.existsSync()) {
+      try {
+        await Process.run(adb.path, ['kill-server']);
+      } catch (_) {}
+    }
+    for (final name in ['adb.exe']) {
+      try {
+        await Process.run('taskkill', ['/F', '/IM', name, '/T']);
+      } catch (_) {}
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 400));
   }
 
   Future<void> _waitForProcess(int processId) async {
@@ -221,11 +245,15 @@ class _UpdaterPageState extends State<UpdaterPage> {
       Object? lastError;
       for (var attempt = 0; attempt < 8; attempt++) {
         try {
-          await file.copy(target.path);
+          await _copyFileOverwrite(file, target);
           lastError = null;
           break;
         } catch (e) {
           lastError = e;
+          // adb.exe may still be locked briefly after kill-server.
+          if (relative.toLowerCase().contains('adb.exe') && attempt == 1) {
+            await _releaseLockedBinaries(destDir);
+          }
           await Future<void>.delayed(Duration(milliseconds: 200 * (attempt + 1)));
         }
       }
@@ -236,6 +264,24 @@ class _UpdaterPageState extends State<UpdaterPage> {
       copiedBytes += sizes[i];
       final p = totalBytes == 0 ? 1.0 : copiedBytes / totalBytes;
       onProgress(p.clamp(0.0, 1.0), i + 1, files.length);
+    }
+  }
+
+  /// Dart [File.copy] fails if the destination already exists (errno 183).
+  Future<void> _copyFileOverwrite(File source, File target) async {
+    if (target.existsSync()) {
+      try {
+        target.deleteSync();
+      } catch (_) {
+        // Fall through — write may still succeed after retry/kill.
+      }
+    }
+    try {
+      await source.copy(target.path);
+    } catch (_) {
+      // Fallback when copy still refuses overwrite / locked briefly.
+      final bytes = await source.readAsBytes();
+      await target.writeAsBytes(bytes, flush: true);
     }
   }
 
