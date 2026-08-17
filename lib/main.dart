@@ -46,7 +46,9 @@ Future<void> main(List<String> args) async {
     }
 
     final state = AppState();
-    await state.init();
+    // 不要阻塞 runApp：初始化里可能会进行 adb/磁盘探测，
+    // 会导致 Windows 启动阶段出现一段白屏。
+    unawaited(state.init());
     runApp(AdbUtilsApp(state: state));
   }, (error, stack) {
     debugPrint('[ZoneError] $error');

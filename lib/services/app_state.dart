@@ -76,7 +76,7 @@ class AppState extends ChangeNotifier {
   Timer? _pollTimer;
   bool _refreshingDevices = false;
 
-  static const appVersion = '1.0.2';
+  static const appVersion = '1.0.3';
   static const githubRepo = 'ZRainH/adb_utils';
 
   ThemeMode get themeMode => switch (settings.themePref) {
@@ -96,7 +96,8 @@ class AppState extends ChangeNotifier {
       lastError = '未检测到 adb。请在设置中指定 platform-tools 路径。';
       notifyListeners();
     } else if (settings.autoRefreshOnStartup) {
-      await refreshDevices();
+      // 不要阻塞 UI：设备扫描/指标刷新可能耗时。
+      unawaited(refreshDevices());
     }
     _syncPollTimer();
     if (settings.checkUpdatesOnStartup) {
