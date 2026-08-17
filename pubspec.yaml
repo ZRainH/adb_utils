@@ -1,7 +1,7 @@
 name: adb_utils
 description: "ADB 桌面工具 — 管理设备、应用、文件与日志"
 publish_to: 'none'
-version: 1.1.2+4
+version: 1.0.0+1
 
 environment:
   sdk: ^3.12.2
@@ -11,6 +11,7 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   archive: ^4.0.9
+  window_manager: ^0.5.2
 
 dev_dependencies:
   flutter_test:

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../theme/app_colors.dart';
 
@@ -44,25 +45,33 @@ class AppSidebar extends StatelessWidget {
       ),
       child: Column(
         children: [
-          const SizedBox(height: 20),
-          Container(
-            width: 36,
-            height: 36,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: AppColors.accent,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              'A',
-              style: TextStyle(
-                color: AppColors.accentOn,
-                fontWeight: FontWeight.w800,
-                fontSize: 18,
+          DragToMoveArea(
+            child: SizedBox(
+              height: 48,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 28,
+                    height: 28,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: AppColors.accent,
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                    child: Text(
+                      'A',
+                      style: TextStyle(
+                        color: AppColors.accentOn,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
-          const SizedBox(height: 8),
           Text(
             'ADB',
             style: TextStyle(
@@ -72,7 +81,7 @@ class AppSidebar extends StatelessWidget {
               letterSpacing: 1.2,
             ),
           ),
-          const SizedBox(height: 28),
+          const SizedBox(height: 20),
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10),

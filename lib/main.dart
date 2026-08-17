@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'services/app_state.dart';
 import 'theme/app_colors.dart';
@@ -14,6 +17,25 @@ Future<void> main(List<String> args) async {
   }
 
   WidgetsFlutterBinding.ensureInitialized();
+
+  if (Platform.isWindows) {
+    await windowManager.ensureInitialized();
+    const options = WindowOptions(
+      size: Size(1280, 720),
+      minimumSize: Size(960, 640),
+      center: true,
+      backgroundColor: Colors.transparent,
+      skipTaskbar: false,
+      titleBarStyle: TitleBarStyle.hidden,
+      title: 'ADB 桌面工具',
+    );
+    await windowManager.waitUntilReadyToShow(options, () async {
+      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      await windowManager.show();
+      await windowManager.focus();
+    });
+  }
+
   final state = AppState();
   await state.init();
   runApp(AdbUtilsApp(state: state));

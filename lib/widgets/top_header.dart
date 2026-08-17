@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../services/app_state.dart';
 import '../theme/app_colors.dart';
+import 'window_caption_buttons.dart';
 
 class TopHeader extends StatelessWidget {
   const TopHeader({
@@ -30,86 +32,112 @@ class TopHeader extends StatelessWidget {
     final textSecondary = AppColors.textSecondaryOf(context);
     final accentBright = AppColors.accentBrightOf(context);
     return Container(
-      height: 64,
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+      height: 48,
       decoration: BoxDecoration(
         color: surface,
         border: Border(bottom: BorderSide(color: border)),
       ),
       child: Row(
         children: [
-          Flexible(
-            child: Text(
-              'ADB 桌面工具',
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w700,
-                color: textPrimary,
-                letterSpacing: 0.25,
+          Expanded(
+            child: DragToMoveArea(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onDoubleTap: () async {
+                  if (await windowManager.isMaximized()) {
+                    await windowManager.unmaximize();
+                  } else {
+                    await windowManager.maximize();
+                  }
+                },
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 20),
+                  child: Row(
+                    children: [
+                      Text(
+                        'ADB 桌面工具',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: textPrimary,
+                          letterSpacing: 0.25,
+                        ),
+                      ),
+                      if (showDatabaseBadge) ...[
+                        const SizedBox(width: 12),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppColors.accent.withValues(alpha: 0.25),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: accentBright.withValues(alpha: 0.5),
+                            ),
+                          ),
+                          child: Text(
+                            '数据库查看器',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.accentOn,
+                            ),
+                          ),
+                        ),
+                      ],
+                      if (device != null) ...[
+                        const SizedBox(width: 12),
+                        Flexible(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppColors.chipOf(context),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(color: border),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: accentBright,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                  child: Text(
+                                    '已连接：${device.name}',
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: textSecondary,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                      const Spacer(),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
-          if (showDatabaseBadge) ...[
-            const SizedBox(width: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              decoration: BoxDecoration(
-                color: AppColors.accent.withValues(alpha: 0.25),
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(color: accentBright.withValues(alpha: 0.5)),
-              ),
-              child: Text(
-                '数据库查看器',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.accentOn,
-                ),
-              ),
-            ),
-          ],
-          if (device != null) ...[
-            const SizedBox(width: 12),
-            Flexible(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: AppColors.chipOf(context),
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(color: border),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: accentBright,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Flexible(
-                      child: Text(
-                        '已连接：${device.name}',
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: textSecondary,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-          const SizedBox(width: 12),
           if (showSearch)
             ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 256, minWidth: 120),
+              constraints: const BoxConstraints(maxWidth: 240, minWidth: 120),
               child: TextField(
                 onChanged: state.setSearch,
                 style: TextStyle(fontSize: 14, color: textPrimary),
@@ -152,8 +180,8 @@ class TopHeader extends StatelessWidget {
             Container(width: 1, height: 24, color: border),
             const SizedBox(width: 8),
             Container(
-              width: 32,
-              height: 32,
+              width: 28,
+              height: 28,
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: AppColors.accent,
@@ -164,11 +192,13 @@ class TopHeader extends StatelessWidget {
                 style: TextStyle(
                   color: AppColors.accentOn,
                   fontWeight: FontWeight.w700,
-                  fontSize: 12,
+                  fontSize: 11,
                 ),
               ),
             ),
           ],
+          const SizedBox(width: 4),
+          const WindowCaptionButtons(),
         ],
       ),
     );
@@ -188,7 +218,8 @@ class _IconBtn extends StatelessWidget {
       onPressed: onTap,
       tooltip: tooltip,
       icon: Icon(icon, size: 20, color: AppColors.textSecondaryOf(context)),
-      splashRadius: 20,
+      splashRadius: 18,
+      visualDensity: VisualDensity.compact,
     );
   }
 }

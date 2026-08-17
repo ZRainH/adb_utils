@@ -108,8 +108,16 @@ install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
 
 # Bundle Android platform-tools (adb / sqlite3) next to the executable.
+# Kill leftover adb.exe first — a running server locks files and breaks INSTALL.
 set(PLATFORM_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/platform-tools")
 if(EXISTS "${PLATFORM_TOOLS_DIR}/adb.exe")
+  install(CODE "
+    execute_process(
+      COMMAND taskkill /F /IM adb.exe /T
+      ERROR_QUIET OUTPUT_QUIET
+    )
+    file(REMOVE_RECURSE \"${INSTALL_BUNDLE_LIB_DIR}/platform-tools\")
+  " COMPONENT Runtime)
   install(DIRECTORY "${PLATFORM_TOOLS_DIR}/"
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/platform-tools"
     COMPONENT Runtime)
