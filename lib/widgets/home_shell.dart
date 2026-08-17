@@ -13,6 +13,7 @@ import '../services/app_state.dart';
 import '../theme/app_colors.dart';
 import '../widgets/app_sidebar.dart';
 import '../widgets/top_header.dart';
+import '../widgets/update_dialog.dart';
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key, required this.state});
@@ -49,15 +50,7 @@ class _HomeShellState extends State<HomeShell> {
     _updateNotified = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('发现新版本 ${info.latestTag}'),
-          action: SnackBarAction(
-            label: '查看',
-            onPressed: () => widget.state.openExternalUrl(info.url),
-          ),
-        ),
-      );
+      showUpdateAvailableDialog(context, widget.state);
     });
   }
 

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive_io.dart';
 import 'package:flutter/material.dart';
 
 import '../models/device_info.dart';
@@ -15,11 +16,25 @@ class UpdateInfo {
     required this.latestTag,
     required this.url,
     required this.hasUpdate,
+    this.downloadUrl,
+    this.assetName,
+    this.assetSize = 0,
+    this.releaseNotes = '',
   });
 
   final String latestTag;
   final String url;
   final bool hasUpdate;
+  final String? downloadUrl;
+  final String? assetName;
+  final int assetSize;
+  final String releaseNotes;
+
+  String get sizeLabel {
+    if (assetSize <= 0) return '';
+    final mb = assetSize / (1024 * 1024);
+    return '${mb.toStringAsFixed(1)} MB';
+  }
 }
 
 class AppState extends ChangeNotifier {
@@ -54,9 +69,13 @@ class AppState extends ChangeNotifier {
   MemoryMetrics memory = MemoryMetrics.empty;
 
   UpdateInfo? updateInfo;
+  bool updateDownloadInProgress = false;
+  double updateDownloadProgress = 0;
+  String? updateDownloadPath;
+  String? updateDownloadError;
   Timer? _pollTimer;
 
-  static const appVersion = '1.1.0';
+  static const appVersion = '1.1.1';
   static const githubRepo = 'ZRainH/adb_utils';
 
   ThemeMode get themeMode => switch (settings.themePref) {
@@ -70,6 +89,7 @@ class AppState extends ChangeNotifier {
     settings.adbPathMode = AdbPathMode.bundled;
     _applyThemeColors();
     _recreateAdb();
+    unawaited(_cleanupOldUpdateExtracts());
     adbAvailable = await adb.isAvailable();
     if (!adbAvailable) {
       lastError = '未检测到 adb。请在设置中指定 platform-tools 路径。';
@@ -81,6 +101,39 @@ class AppState extends ChangeNotifier {
     if (settings.checkUpdatesOnStartup) {
       unawaited(checkForUpdates());
     }
+  }
+
+  Future<void> _cleanupOldUpdateExtracts() async {
+    try {
+      final root =
+          '${settings.effectiveSaveDirectory}${Platform.pathSeparator}updates';
+      _tryDeleteOldExtracts(root);
+    } catch (_) {}
+  }
+
+  /// Best-effort cleanup. Locked folders (running updater) are skipped.
+  void _tryDeleteOldExtracts(String updatesDir, {String? keepPath}) {
+    try {
+      final root = Directory(updatesDir);
+      if (!root.existsSync()) return;
+      for (final entity in root.listSync()) {
+        if (entity is! Directory) continue;
+        if (keepPath != null && _samePath(entity.path, keepPath)) continue;
+        final name = entity.path.split(Platform.pathSeparator).last;
+        if (!name.startsWith('extract_')) continue;
+        try {
+          entity.deleteSync(recursive: true);
+        } catch (e) {
+          debugPrint('[更新清理] 跳过占用中的目录 ${entity.path}: $e');
+        }
+      }
+    } catch (_) {}
+  }
+
+  bool _samePath(String a, String b) {
+    final na = a.replaceAll('/', r'\').toLowerCase();
+    final nb = b.replaceAll('/', r'\').toLowerCase();
+    return na == nb;
   }
 
   void _applyThemeColors() {
@@ -339,24 +392,374 @@ class AppState extends ChangeNotifier {
       final tag = (json['tag_name'] as String? ?? '').trim();
       final htmlUrl = json['html_url'] as String? ??
           'https://github.com/$githubRepo/releases';
+      final notes = (json['body'] as String? ?? '').trim();
       if (tag.isEmpty) {
         debugPrint('[更新检查] tag_name 为空');
         return;
       }
+
+      String? downloadUrl;
+      String? assetName;
+      var assetSize = 0;
+      final assets = json['assets'];
+      if (assets is List) {
+        Map<String, dynamic>? preferred;
+        Map<String, dynamic>? anyZip;
+        for (final raw in assets) {
+          if (raw is! Map) continue;
+          final map = Map<String, dynamic>.from(raw);
+          final name = (map['name'] as String? ?? '').toLowerCase();
+          if (!name.endsWith('.zip')) continue;
+          anyZip ??= map;
+          if (name.contains('windows')) {
+            preferred = map;
+            break;
+          }
+        }
+        final chosen = preferred ?? anyZip;
+        if (chosen != null) {
+          downloadUrl = chosen['browser_download_url'] as String?;
+          assetName = chosen['name'] as String?;
+          assetSize = (chosen['size'] as num?)?.toInt() ?? 0;
+        }
+      }
+
       final latest = tag.replaceFirst(RegExp(r'^v'), '');
       final hasUpdate = _isNewer(latest, appVersion);
       debugPrint(
-        '[更新检查] 当前=$appVersion 最新=$tag hasUpdate=$hasUpdate html_url=$htmlUrl',
+        '[更新检查] 当前=$appVersion 最新=$tag hasUpdate=$hasUpdate '
+        'download=${downloadUrl ?? "(无)"}',
       );
       updateInfo = UpdateInfo(
         latestTag: tag,
         url: htmlUrl,
         hasUpdate: hasUpdate,
+        downloadUrl: downloadUrl,
+        assetName: assetName,
+        assetSize: assetSize,
+        releaseNotes: notes,
       );
       notifyListeners();
     } catch (e, st) {
       debugPrint('[更新检查] 失败: $e');
       debugPrint('$st');
+    }
+  }
+
+  /// Downloads the release zip into the configured save directory.
+  /// Returns the local file path on success.
+  Future<String?> downloadUpdate({
+    void Function(double progress)? onProgress,
+  }) async {
+    final info = updateInfo;
+    final downloadUrl = info?.downloadUrl;
+    if (info == null || !info.hasUpdate || downloadUrl == null || downloadUrl.isEmpty) {
+      updateDownloadError = '没有可下载的安装包';
+      notifyListeners();
+      return null;
+    }
+
+    updateDownloadInProgress = true;
+    updateDownloadProgress = 0;
+    updateDownloadError = null;
+    updateDownloadPath = null;
+    notifyListeners();
+
+    final dir = Directory(
+      '${settings.effectiveSaveDirectory}${Platform.pathSeparator}updates',
+    );
+    try {
+      dir.createSync(recursive: true);
+    } catch (e) {
+      updateDownloadInProgress = false;
+      updateDownloadError = '无法创建下载目录：$e';
+      notifyListeners();
+      return null;
+    }
+
+    final fileName = info.assetName?.trim().isNotEmpty == true
+        ? info.assetName!
+        : 'adb_utils-${info.latestTag}.zip';
+    final path = '${dir.path}${Platform.pathSeparator}$fileName';
+    final candidates = _githubDownloadCandidates(downloadUrl);
+    Object? lastError;
+
+    for (var i = 0; i < candidates.length; i++) {
+      final url = candidates[i];
+      final label = i == 0 ? '直连' : '镜像$i';
+      debugPrint('[更新下载] 尝试 $label: $url');
+      debugPrint('[更新下载] 保存到 $path');
+      try {
+        final received = await _downloadFile(
+          url: url,
+          path: path,
+          onProgress: (p) {
+            updateDownloadProgress = p;
+            onProgress?.call(p);
+            notifyListeners();
+          },
+        );
+        updateDownloadProgress = 1;
+        updateDownloadPath = path;
+        updateDownloadInProgress = false;
+        debugPrint('[更新下载] 完成($label) $path ($received bytes)');
+        notifyListeners();
+        return path;
+      } catch (e, st) {
+        lastError = e;
+        debugPrint('[更新下载] $label 失败: $e');
+        debugPrint('$st');
+        try {
+          final f = File(path);
+          if (f.existsSync()) f.deleteSync();
+        } catch (_) {}
+        updateDownloadProgress = 0;
+        notifyListeners();
+      }
+    }
+
+    updateDownloadInProgress = false;
+    updateDownloadError =
+        '下载失败（GitHub 网络超时）。已尝试直连与镜像。\n$lastError';
+    notifyListeners();
+    return null;
+  }
+
+  /// Direct GitHub URL first, then public mirrors (helpful in CN networks).
+  List<String> _githubDownloadCandidates(String original) {
+    const mirrors = <String>[
+      'https://gh-proxy.com/',
+      'https://ghproxy.net/',
+      'https://mirror.ghproxy.com/',
+      'https://gh.llkk.cc/',
+    ];
+    return <String>[
+      original,
+      for (final mirror in mirrors) '$mirror$original',
+    ];
+  }
+
+  Future<int> _downloadFile({
+    required String url,
+    required String path,
+    void Function(double progress)? onProgress,
+  }) async {
+    final client = HttpClient();
+    client.userAgent = 'adb_utils/$appVersion';
+    client.connectionTimeout = const Duration(seconds: 45);
+    client.idleTimeout = const Duration(seconds: 120);
+    client.autoUncompress = true;
+
+    try {
+      final req = await client.getUrl(Uri.parse(url));
+      final res = await req.close().timeout(const Duration(seconds: 60));
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw HttpException('下载失败 HTTP ${res.statusCode}');
+      }
+
+      final total = res.contentLength;
+      final file = File(path);
+      final sink = file.openWrite();
+      var received = 0;
+      try {
+        await for (final chunk in res.timeout(const Duration(seconds: 120))) {
+          sink.add(chunk);
+          received += chunk.length;
+          final p = total > 0 ? (received / total).clamp(0.0, 1.0) : 0.0;
+          onProgress?.call(p);
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
+
+      if (received <= 0) {
+        throw const HttpException('下载内容为空');
+      }
+      // Zip local header magic: PK\x03\x04
+      final header = await file.openRead(0, 4).first;
+      if (header.length < 2 || header[0] != 0x50 || header[1] != 0x4b) {
+        throw const HttpException('下载结果不是有效的 zip（可能是镜像错误页）');
+      }
+      return received;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Downloads the zip, extracts it, then launches a GUI updater process
+  /// (same exe with `--updater`) that copies files with a progress bar.
+  ///
+  /// [onProgress] receives 0..1 and a short Chinese status label.
+  /// Returns `true` when the updater was started (app should exit).
+  Future<bool> downloadAndApplyUpdate({
+    void Function(double progress, String status)? onProgress,
+  }) async {
+    void report(double p, String status) {
+      updateDownloadProgress = p.clamp(0.0, 1.0);
+      onProgress?.call(updateDownloadProgress, status);
+      notifyListeners();
+    }
+
+    final zipPath = await downloadUpdate(
+      onProgress: (p) => report(p * 0.75, '正在下载（含镜像重试）…'),
+    );
+    if (zipPath == null) return false;
+
+    if (!Platform.isWindows) {
+      updateDownloadError = '当前仅支持 Windows 自动覆盖安装';
+      notifyListeners();
+      return false;
+    }
+
+    updateDownloadInProgress = true;
+    notifyListeners();
+
+    try {
+      report(0.78, '正在解压…');
+      final updatesDir = File(zipPath).parent.path;
+      final tag = (updateInfo?.latestTag ?? 'latest')
+          .replaceAll(RegExp(r'[^\w.\-]'), '_');
+      // Unique folder each time — a previous updater may still lock extract_*.
+      final extractDir =
+          '$updatesDir${Platform.pathSeparator}extract_${tag}_${DateTime.now().millisecondsSinceEpoch}';
+      _tryDeleteOldExtracts(updatesDir, keepPath: extractDir);
+      Directory(extractDir).createSync(recursive: true);
+
+      await extractFileToDisk(zipPath, extractDir);
+      final payloadRoot = _resolveUpdatePayloadRoot(extractDir);
+      final payloadExe =
+          File('$payloadRoot${Platform.pathSeparator}adb_utils.exe');
+      if (!payloadExe.existsSync()) {
+        throw StateError('安装包中未找到 adb_utils.exe');
+      }
+
+      report(0.92, '启动安装界面…');
+      final installDir = File(Platform.resolvedExecutable).parent.path;
+      // Run updater from the *extracted* binary so installDir\adb_utils.exe
+      // is not locked by the updater process itself.
+      final updaterExe =
+          '$payloadRoot${Platform.pathSeparator}adb_utils.exe';
+      final targetExe =
+          '$installDir${Platform.pathSeparator}adb_utils.exe';
+
+      debugPrint('[更新安装] payload=$payloadRoot');
+      debugPrint('[更新安装] installDir=$installDir');
+      debugPrint('[更新安装] updaterExe=$updaterExe pid=$pid');
+
+      // Do NOT use Process.start(detached) on the Flutter exe itself —
+      // on Windows the child often runs without a visible window.
+      // `cmd start` / Start-Process creates a normal desktop process.
+      await _launchWindowsUpdater(
+        updaterExe: updaterExe,
+        workingDirectory: payloadRoot,
+        waitPid: pid,
+        sourceDir: payloadRoot,
+        installDir: installDir,
+        exePath: targetExe,
+      );
+
+      report(1, '即将退出，安装程序将继续…');
+      await Future<void>.delayed(const Duration(milliseconds: 800));
+      return true;
+    } catch (e, st) {
+      debugPrint('[更新安装] 失败: $e');
+      debugPrint('$st');
+      updateDownloadError = e.toString();
+      updateDownloadInProgress = false;
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Launch the GUI updater outside Flutter's process job so its window shows.
+  Future<void> _launchWindowsUpdater({
+    required String updaterExe,
+    required String workingDirectory,
+    required int waitPid,
+    required String sourceDir,
+    required String installDir,
+    required String exePath,
+  }) async {
+    final updaterArgs = [
+      '--updater',
+      '--pid=$waitPid',
+      '--src=$sourceDir',
+      '--dst=$installDir',
+      '--exe=$exePath',
+    ];
+
+    // Prefer PowerShell Start-Process (reliable visible GUI).
+    final psExe = updaterExe.replaceAll("'", "''");
+    final psWd = workingDirectory.replaceAll("'", "''");
+    final psArgs = updaterArgs
+        .map((a) => "'${a.replaceAll("'", "''")}'")
+        .join(',');
+    final ps = await Process.run(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-WindowStyle',
+        'Hidden',
+        '-Command',
+        "Start-Process -FilePath '$psExe' -WorkingDirectory '$psWd' "
+            "-ArgumentList @($psArgs)",
+      ],
+    );
+    if (ps.exitCode == 0) {
+      debugPrint('[更新安装] 已通过 Start-Process 启动安装窗口');
+      return;
+    }
+    debugPrint(
+      '[更新安装] Start-Process 失败(${ps.exitCode}): ${ps.stderr}，改用 cmd start',
+    );
+
+    // Fallback: cmd start "" "exe" args…
+    final cmd = await Process.start(
+      'cmd.exe',
+      [
+        '/c',
+        'start',
+        '',
+        updaterExe,
+        ...updaterArgs,
+      ],
+      workingDirectory: workingDirectory,
+      mode: ProcessStartMode.detached,
+    );
+    // Detached — don't wait forever; give start a moment to spawn.
+    unawaited(cmd.exitCode);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+  }
+
+  String _resolveUpdatePayloadRoot(String extractDir) {
+    final direct =
+        File('$extractDir${Platform.pathSeparator}adb_utils.exe');
+    if (direct.existsSync()) return extractDir;
+
+    final children = Directory(extractDir).listSync();
+    for (final entity in children) {
+      if (entity is! Directory) continue;
+      final candidate =
+          File('${entity.path}${Platform.pathSeparator}adb_utils.exe');
+      if (candidate.existsSync()) return entity.path;
+    }
+    return extractDir;
+  }
+
+  void openDownloadedUpdate() {
+    final path = updateDownloadPath;
+    if (path == null || path.isEmpty) return;
+    try {
+      if (Platform.isWindows) {
+        Process.start('explorer.exe', ['/select,', path]);
+      } else {
+        openExternalUrl(File(path).parent.path);
+      }
+    } catch (e) {
+      debugPrint('[更新下载] 打开文件夹失败: $e');
     }
   }
 

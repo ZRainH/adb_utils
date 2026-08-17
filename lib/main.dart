@@ -3,9 +3,16 @@ import 'package:flutter/material.dart';
 import 'services/app_state.dart';
 import 'theme/app_colors.dart';
 import 'theme/app_theme.dart';
+import 'updater/updater_args.dart';
+import 'updater/updater_app.dart';
 import 'widgets/home_shell.dart';
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
+  if (UpdaterArgs.isUpdaterMode(args)) {
+    await runUpdaterApp(args);
+    return;
+  }
+
   WidgetsFlutterBinding.ensureInitialized();
   final state = AppState();
   await state.init();

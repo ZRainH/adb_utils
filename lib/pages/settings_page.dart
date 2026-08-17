@@ -4,6 +4,7 @@ import '../services/app_settings.dart';
 import '../services/app_state.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common_widgets.dart';
+import '../widgets/update_dialog.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key, required this.state});
@@ -271,7 +272,27 @@ class _SettingsPageState extends State<SettingsPage> {
                       : () async {
                           setState(() => _checkingUpdate = true);
                           await widget.state.checkForUpdates();
-                          if (mounted) setState(() => _checkingUpdate = false);
+                          if (!mounted) return;
+                          setState(() => _checkingUpdate = false);
+                          final info = widget.state.updateInfo;
+                          if (info == null) {
+                            ScaffoldMessenger.of(this.context).showSnackBar(
+                              const SnackBar(content: Text('检查更新失败，请稍后重试')),
+                            );
+                            return;
+                          }
+                          if (info.hasUpdate) {
+                            await showUpdateAvailableDialog(
+                              this.context,
+                              widget.state,
+                            );
+                          } else {
+                            ScaffoldMessenger.of(this.context).showSnackBar(
+                              SnackBar(
+                                content: Text('已是最新版本（${info.latestTag}）'),
+                              ),
+                            );
+                          }
                         },
                 ),
                 const SizedBox(width: 8),
@@ -283,6 +304,16 @@ class _SettingsPageState extends State<SettingsPage> {
                         'https://github.com/${AppState.githubRepo}/releases',
                   ),
                 ),
+                if (widget.state.updateInfo?.hasUpdate == true) ...[
+                  const SizedBox(width: 8),
+                  ActionButton(
+                    label: '下载更新',
+                    filled: true,
+                    icon: Icons.download,
+                    onPressed: () =>
+                        showUpdateAvailableDialog(context, widget.state),
+                  ),
+                ],
               ],
             ),
           ),
