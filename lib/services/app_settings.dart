@@ -51,15 +51,84 @@ class AppSettings {
   bool confirmDangerousActions;
 
   static String defaultDownloads() {
+    final sep = Platform.pathSeparator;
     final home = Platform.environment['USERPROFILE'] ??
         Platform.environment['HOME'] ??
         Directory.systemTemp.path;
-    return '$home${Platform.pathSeparator}Downloads${Platform.pathSeparator}adb_utils';
+
+    // Prefer the real Windows "Downloads" known folder (may be redirected /
+    // localized, e.g. OneDrive\Downloads or 下载).
+    final known = _windowsDownloadsKnownFolder();
+    final candidates = <String>[
+      if (known != null && known.isNotEmpty) known,
+      '$home${sep}Downloads',
+      '$home$sep${'下载'}',
+      '$home${sep}Documents',
+      home,
+    ];
+
+    String? base;
+    for (final c in candidates) {
+      try {
+        final dir = Directory(c);
+        if (dir.existsSync()) {
+          base = dir.path;
+          break;
+        }
+      } catch (_) {}
+    }
+    base ??= '$home${sep}Downloads';
+
+    final target = '$base${sep}adb_utils';
+    try {
+      Directory(target).createSync(recursive: true);
+    } catch (_) {}
+    return target;
+  }
+
+  /// Resolves the current user's Downloads folder on Windows via registry.
+  static String? _windowsDownloadsKnownFolder() {
+    if (!Platform.isWindows) return null;
+    try {
+      final result = Process.runSync(
+        'reg',
+        [
+          'query',
+          r'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders',
+          '/v',
+          '{374DE290-123F-4565-9164-39C4925E467B}',
+        ],
+        runInShell: false,
+      );
+      if (result.exitCode != 0) return null;
+      final out = '${result.stdout}';
+      // REG_EXPAND_SZ    {guid}    C:\Users\...\Downloads
+      final match = RegExp(
+        r'\{374DE290-123F-4565-9164-39C4925E467B\}\s+REG_\w+\s+(.+)$',
+        multiLine: true,
+      ).firstMatch(out);
+      var path = match?.group(1)?.trim();
+      if (path == null || path.isEmpty) return null;
+      path = path.replaceAll('"', '');
+      // Expand %USERPROFILE% etc.
+      path = path.replaceAllMapped(RegExp(r'%([^%]+)%'), (m) {
+        return Platform.environment[m.group(1)!] ?? m.group(0)!;
+      });
+      return path;
+    } catch (_) {
+      return null;
+    }
   }
 
   String get effectiveSaveDirectory {
     final v = saveDirectory.trim();
-    return v.isEmpty ? defaultDownloads() : v;
+    if (v.isEmpty) return defaultDownloads();
+    // Normalize slashes on Windows so mixed "C:/Users/..." still works.
+    final normalized = Platform.isWindows ? v.replaceAll('/', r'\') : v;
+    try {
+      Directory(normalized).createSync(recursive: true);
+    } catch (_) {}
+    return normalized;
   }
 
   Map<String, dynamic> toJson() => {

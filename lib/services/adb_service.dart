@@ -926,48 +926,67 @@ class AdbService {
     throw lastError ?? AdbException('无法列出目录：$normalized');
   }
 
-  List<String> _pathCandidates(String path) {
-    final results = <String>[path];
-    if (path.startsWith('/storage/emulated/0')) {
-      results.add(path.replaceFirst('/storage/emulated/0', '/sdcard'));
-    } else if (path.startsWith('/sdcard')) {
-      results.add(path.replaceFirst('/sdcard', '/storage/emulated/0'));
-    }
-    return results;
-  }
-
-  bool _isUnderAndroidData(String path) {
-    return path == '/sdcard/Android/data' ||
-        path.startsWith('/sdcard/Android/data/') ||
-        path == '/storage/emulated/0/Android/data' ||
-        path.startsWith('/storage/emulated/0/Android/data/');
-  }
-
-  bool _isAndroidDataRoot(String path) {
-    return path == '/sdcard/Android/data' ||
-        path == '/storage/emulated/0/Android/data';
-  }
-
-  String? _packageFromAndroidDataPath(String path) {
-    const marker = '/Android/data/';
-    final i = path.indexOf(marker);
-    if (i < 0) return null;
-    final rest = path.substring(i + marker.length);
-    if (rest.isEmpty) return null;
-    final pkg = rest.split('/').first;
-    if (pkg.contains('.')) return pkg;
-    return null;
-  }
-
   String _normalizeRemotePath(String path) {
-    if (path.isEmpty) return '/sdcard';
+    if (path.isEmpty) return '/storage/emulated/0';
     var p = path.replaceAll('\\', '/').trim();
     if (!p.startsWith('/')) p = '/$p';
     while (p.contains('//')) {
       p = p.replaceAll('//', '/');
     }
-    if (p.length > 1 && p.endsWith('/')) p = p.substring(0, p.length - 1);
+    if (p.length > 1 && p.endsWith('/')) {
+      p = p.substring(0, p.length - 1);
+    }
+
+    // /sdcard is a symlink to external storage on most devices. Canonicalize so
+    // we never end up with /storage/emulated/0/sdcard by mistake.
+    if (p == '/sdcard' || p.startsWith('/sdcard/')) {
+      p = '/storage/emulated/0${p.substring('/sdcard'.length)}';
+    }
+    if (p == '/storage/self/primary' || p.startsWith('/storage/self/primary/')) {
+      p = '/storage/emulated/0${p.substring('/storage/self/primary'.length)}';
+    }
+    // Collapse mistaken nested alias: .../0/sdcard(/...)
+    const nested = '/storage/emulated/0/sdcard';
+    while (p == nested || p.startsWith('$nested/')) {
+      p = '/storage/emulated/0${p.substring(nested.length)}';
+      if (p.isEmpty) p = '/storage/emulated/0';
+    }
     return p;
+  }
+
+  List<String> _pathCandidates(String path) {
+    final normalized = _normalizeRemotePath(path);
+    final results = <String>[normalized];
+    // Also try the legacy /sdcard alias for older firmwares.
+    if (normalized == '/storage/emulated/0' ||
+        normalized.startsWith('/storage/emulated/0/')) {
+      final alias =
+          '/sdcard${normalized.substring('/storage/emulated/0'.length)}';
+      if (alias != normalized) results.add(alias);
+    }
+    return results;
+  }
+
+  bool _isUnderAndroidData(String path) {
+    final p = _normalizeRemotePath(path);
+    return p == '/storage/emulated/0/Android/data' ||
+        p.startsWith('/storage/emulated/0/Android/data/');
+  }
+
+  bool _isAndroidDataRoot(String path) {
+    return _normalizeRemotePath(path) == '/storage/emulated/0/Android/data';
+  }
+
+  String? _packageFromAndroidDataPath(String path) {
+    final p = _normalizeRemotePath(path);
+    const marker = '/Android/data/';
+    final i = p.indexOf(marker);
+    if (i < 0) return null;
+    final rest = p.substring(i + marker.length);
+    if (rest.isEmpty) return null;
+    final pkg = rest.split('/').first;
+    if (pkg.contains('.')) return pkg;
+    return null;
   }
 
   String? _packageFromDataPath(String path) {
@@ -990,7 +1009,10 @@ class AdbService {
       final perm = parts[0];
       if (!RegExp(r'^[-dlcbps]').hasMatch(perm)) continue;
 
-      final isDir = perm.startsWith('d') || perm.startsWith('l');
+      final isDir = perm.startsWith('d');
+      // Symlinks (l…) are not navigated as folders — avoids /sdcard loops.
+      if (perm.startsWith('l')) continue;
+
       String name;
       String modified;
       int sizeBytes = 0;
@@ -1010,7 +1032,14 @@ class AdbService {
 
       if (name == '.' || name == '..') continue;
       if (name.contains(' -> ')) {
-        name = name.split(' -> ').first;
+        name = name.split(' -> ').first.trim();
+      }
+      // Ignore absolute junk names from odd ls output.
+      if (name.startsWith('/')) continue;
+      if (name == 'sdcard' &&
+          (normalized == '/storage/emulated/0' || normalized == '/sdcard')) {
+        // Nested "sdcard" under external storage is almost always a bogus link.
+        continue;
       }
 
       entries.add(

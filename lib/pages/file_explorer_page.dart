@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../models/file_entry.dart';
@@ -16,7 +18,7 @@ class FileExplorerPage extends StatefulWidget {
 }
 
 class _FileExplorerPageState extends State<FileExplorerPage> {
-  final List<String> _segments = ['设备', 'sdcard'];
+  final List<String> _segments = ['设备', '内部存储'];
   List<FileEntry> _files = const [];
   final Set<String> _selected = {};
   bool _loading = false;
@@ -28,8 +30,17 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
   String? get _serial => widget.state.selectedDevice?.id;
 
   String get _currentPath {
-    if (_segments.length <= 1) return '/sdcard';
-    return '/${_segments.skip(1).join('/')}';
+    if (_segments.length <= 1) return '/storage/emulated/0';
+    final rest = _segments.skip(1).toList();
+    if (rest.length == 1 &&
+        (rest.first == '内部存储' || rest.first == 'sdcard')) {
+      return '/storage/emulated/0';
+    }
+    if (rest.isNotEmpty &&
+        (rest.first == '内部存储' || rest.first == 'sdcard')) {
+      return '/storage/emulated/0/${rest.skip(1).join('/')}';
+    }
+    return '/${rest.join('/')}';
   }
 
   String? get _effectiveRunAs {
@@ -70,7 +81,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
       setState(() {
         _segments
           ..clear()
-          ..addAll(['设备', 'sdcard']);
+          ..addAll(['设备', '内部存储']);
         _runAsPackage = null;
       });
       _load();
@@ -96,17 +107,51 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
     if (normalized.length > 1 && normalized.endsWith('/')) {
       normalized = normalized.substring(0, normalized.length - 1);
     }
+    // Keep breadcrumb friendly for external storage root.
+    if (normalized == '/sdcard' ||
+        normalized == '/storage/emulated/0' ||
+        normalized == '/storage/self/primary') {
+      setState(() {
+        _segments
+          ..clear()
+          ..addAll(['设备', '内部存储']);
+        _runAsPackage = runAsPackage;
+        _selected.clear();
+        _error = null;
+      });
+      _load();
+      return;
+    }
+    if (normalized.startsWith('/sdcard/')) {
+      normalized =
+          '/storage/emulated/0${normalized.substring('/sdcard'.length)}';
+    }
     final parts = normalized.split('/').where((s) => s.isNotEmpty).toList();
+    final crumbs = <String>['设备'];
+    if (parts.length >= 3 &&
+        parts[0] == 'storage' &&
+        parts[1] == 'emulated' &&
+        parts[2] == '0') {
+      crumbs.add('内部存储');
+      crumbs.addAll(parts.skip(3));
+    } else {
+      crumbs.addAll(parts.isEmpty ? ['内部存储'] : parts);
+    }
     setState(() {
       _segments
         ..clear()
-        ..add('设备')
-        ..addAll(parts.isEmpty ? ['sdcard'] : parts);
+        ..addAll(crumbs);
       _runAsPackage = runAsPackage;
       _selected.clear();
       _error = null;
     });
     _load();
+  }
+
+  void _openFolder(FileEntry entry) {
+    if (!entry.isDirectory) return;
+    // Navigate by absolute path to avoid /sdcard nesting bugs.
+    _applyTargetPath(entry.path, _runAsPackage);
   }
 
   Future<void> _load() async {
@@ -141,9 +186,9 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
         if (pkg != null &&
             (path.contains('/data/data/$pkg') || path.contains('/Android/data/'))) {
           final fallbacks = <({String path, String? runAs})>[
-            (path: '/sdcard/Android/data/$pkg', runAs: null),
-            (path: '/sdcard/Android/data/$pkg/files', runAs: null),
-            (path: '/sdcard/Android/data/$pkg/cache', runAs: null),
+            (path: '/storage/emulated/0/Android/data/$pkg', runAs: null),
+            (path: '/storage/emulated/0/Android/data/$pkg/files', runAs: null),
+            (path: '/storage/emulated/0/Android/data/$pkg/cache', runAs: null),
             (path: '/data/data/$pkg', runAs: pkg),
           ];
           Object? lastError = e;
@@ -156,14 +201,8 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                 runAsPackage: fb.runAs,
               );
               if (!mounted) return;
-              final parts =
-                  fb.path.split('/').where((s) => s.isNotEmpty).toList();
+              _applyTargetPath(fb.path, fb.runAs);
               setState(() {
-                _segments
-                  ..clear()
-                  ..add('设备')
-                  ..addAll(parts);
-                _runAsPackage = fb.runAs;
                 _files = alt;
                 _selected.clear();
                 _loading = false;
@@ -193,12 +232,6 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
         _error = e.toString();
       });
     }
-  }
-
-  void _openFolder(FileEntry entry) {
-    if (!entry.isDirectory) return;
-    setState(() => _segments.add(entry.name));
-    _load();
   }
 
   void _goToSegment(int index) {
@@ -231,7 +264,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
     final path = await _promptPath(
       context,
       '跳转到路径',
-      '/sdcard/Android/data/com.example/files',
+      '/storage/emulated/0/Android/data/com.example/files',
     );
     if (path == null || path.trim().isEmpty) return;
     final trimmed = path.trim();
@@ -269,7 +302,8 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
     String? lastError;
     for (final remote in _selected) {
       final name = remote.split('/').last;
-      final local = '$localDir${localDir.endsWith('\\') || localDir.endsWith('/') ? '' : '\\'}$name';
+      final local =
+          '$localDir${Platform.pathSeparator}$name';
       lastError = await widget.state.adb.pullFile(serial, remote, local);
       if (lastError != null) break;
     }

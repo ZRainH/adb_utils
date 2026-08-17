@@ -76,7 +76,7 @@ class AppState extends ChangeNotifier {
   Timer? _pollTimer;
   bool _refreshingDevices = false;
 
-  static const appVersion = '1.0.1';
+  static const appVersion = '1.0.2';
   static const githubRepo = 'ZRainH/adb_utils';
 
   ThemeMode get themeMode => switch (settings.themePref) {
@@ -351,7 +351,7 @@ class AppState extends ChangeNotifier {
   void openAppCacheDir(String packageName) {
     final pkg = packageName.trim();
     if (pkg.isEmpty) return;
-    filesTargetPath = '/sdcard/Android/data/$pkg';
+    filesTargetPath = '/storage/emulated/0/Android/data/$pkg';
     filesRunAsPackage = pkg;
     filesNavToken++;
     selectedNav = 2;
