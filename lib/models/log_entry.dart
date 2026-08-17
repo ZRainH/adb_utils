@@ -2,7 +2,21 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_colors.dart';
 
-enum LogLevel { verbose, debug, info, warning, error }
+enum LogLevel {
+  verbose,
+  debug,
+  info,
+  warning,
+  error;
+
+  static LogLevel? fromName(String? name) {
+    if (name == null || name.isEmpty) return null;
+    for (final e in values) {
+      if (e.name == name) return e;
+    }
+    return null;
+  }
+}
 
 class LogEntry {
   const LogEntry({

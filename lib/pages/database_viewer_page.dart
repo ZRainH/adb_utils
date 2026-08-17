@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/device_database.dart';
+import '../services/app_settings.dart';
 import '../services/app_state.dart';
 import '../services/device_db_service.dart';
 import '../theme/app_colors.dart';
@@ -49,6 +50,18 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
 
   String? get _serial => widget.state.selectedDevice?.id;
   String? get _packageFilter => widget.state.dbPackageFilter;
+  int get _queryLimit => widget.state.settings.dbQueryLimit;
+
+  String _selectSql(String table) => 'SELECT * FROM $table LIMIT $_queryLimit;';
+
+  void _applySettingsDefaults() {
+    _refreshMode = switch (widget.state.settings.dbRefreshMode) {
+      DbRefreshPref.off => _TableRefreshMode.off,
+      DbRefreshPref.timed => _TableRefreshMode.timed,
+      DbRefreshPref.realtime => _TableRefreshMode.realtime,
+    };
+    _timedSeconds = widget.state.settings.dbRefreshSeconds;
+  }
 
   Duration get _refreshInterval {
     switch (_refreshMode) {
@@ -66,6 +79,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
     super.initState();
     _boundSerial = _serial;
     _boundPackageFilter = _packageFilter;
+    _applySettingsDefaults();
     widget.state.addListener(_onState);
     _refreshDatabases();
   }
@@ -125,7 +139,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
         _selectedTable = null;
         _result = DbQueryResult.empty;
         _error = null;
-        _refreshMode = _TableRefreshMode.off;
+        _applySettingsDefaults();
         _queryController.clear();
       });
       _refreshDatabases();
@@ -220,7 +234,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
         _selectedTable = preferred;
         _loadingTables = false;
         if (preferred != null) {
-          _queryController.text = 'SELECT * FROM $preferred LIMIT 50;';
+          _queryController.text = _selectSql(preferred);
         }
       });
       if (preferred != null) {
@@ -242,7 +256,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
     if (table == null) return;
     setState(() {
       _selectedTable = table;
-      _queryController.text = 'SELECT * FROM $table LIMIT 50;';
+      _queryController.text = _selectSql(table);
     });
     await _runQuery();
     _syncAutoRefresh();
@@ -310,16 +324,14 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
             : null);
     if (sql == null) return;
 
-    final downloads = Platform.environment['USERPROFILE'] ??
-        Platform.environment['HOME'] ??
-        Directory.systemTemp.path;
+    final dir = widget.state.settings.effectiveSaveDirectory;
     final stamp = DateTime.now().millisecondsSinceEpoch;
     final path =
-        '$downloads${Platform.pathSeparator}Downloads${Platform.pathSeparator}'
+        '$dir${Platform.pathSeparator}'
         '${db.name.replaceAll('.db', '')}_${_selectedTable ?? 'query'}_$stamp.csv';
 
     try {
-      Directory('$downloads${Platform.pathSeparator}Downloads').createSync(recursive: true);
+      Directory(dir).createSync(recursive: true);
     } catch (_) {}
 
     setState(() => _loadingQuery = true);
@@ -425,7 +437,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                 Expanded(
                   child: Text(
                     _packageFilter == null ? '数据库' : '应用数据库',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
                       color: AppColors.textPrimary,
@@ -441,7 +453,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                           height: 16,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Icon(Icons.refresh, size: 18, color: AppColors.textSecondary),
+                      : Icon(Icons.refresh, size: 18, color: AppColors.textSecondary),
                 ),
               ],
             ),
@@ -458,14 +470,14 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.apps_rounded, size: 14, color: AppColors.accentBright),
+                    Icon(Icons.apps_rounded, size: 14, color: AppColors.accentBright),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         _packageFilter!,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11,
                           fontFamily: 'Consolas',
                           color: AppColors.accentOn,
@@ -474,7 +486,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                     ),
                     InkWell(
                       onTap: widget.state.clearDbPackageFilter,
-                      child: const Padding(
+                      child: Padding(
                         padding: EdgeInsets.all(4),
                         child: Icon(Icons.close, size: 14, color: AppColors.textSecondary),
                       ),
@@ -483,7 +495,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                 ),
               ),
             ),
-          const Divider(height: 1, color: AppColors.border),
+          Divider(height: 1, color: AppColors.border),
           Expanded(
             child: items.isEmpty
                 ? Center(
@@ -496,7 +508,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                                 ? '该应用下未找到可读数据库。\n需可调试（run-as）或 root，也可将 .db 拷到 /sdcard。'
                                 : '未找到可读数据库。\n可调试应用的 databases/ 或 /sdcard 下的 .db 文件会出现在此。',
                         textAlign: TextAlign.center,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 13,
                           color: AppColors.textSecondary,
                           height: 1.4,
@@ -530,7 +542,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                                 db.name,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontSize: 14,
                                   fontWeight: FontWeight.w600,
                                   color: AppColors.textPrimary,
@@ -541,7 +553,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                                 db.directory,
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontSize: 11,
                                   color: AppColors.textMuted,
                                 ),
@@ -580,7 +592,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
               children: [
                 Row(
                   children: [
-                    const Text(
+                    Text(
                       '表：',
                       style: TextStyle(fontSize: 14, color: AppColors.textSecondary),
                     ),
@@ -601,10 +613,10 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                             value: _tables.contains(_selectedTable) ? _selectedTable : null,
                             hint: Text(
                               _loadingTables ? '加载中…' : '选择表',
-                              style: const TextStyle(color: AppColors.textMuted, fontSize: 14),
+                              style: TextStyle(color: AppColors.textMuted, fontSize: 14),
                             ),
                             dropdownColor: AppColors.surfaceElevated,
-                            style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+                            style: TextStyle(color: AppColors.textPrimary, fontSize: 14),
                             items: _tables
                                 .map(
                                   (t) => DropdownMenuItem(value: t, child: Text(t)),
@@ -624,7 +636,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                       ),
                       child: Text(
                         '${_tables.length} 张表',
-                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                        style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -655,7 +667,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                   const SizedBox(height: 10),
                   Text(
                     _error!,
-                    style: const TextStyle(fontSize: 12, color: AppColors.errorLog),
+                    style: TextStyle(fontSize: 12, color: AppColors.errorLog),
                   ),
                 ],
                 const SizedBox(height: 12),
@@ -663,7 +675,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                   child: _loadingQuery || _loadingTables
                       ? const Center(child: CircularProgressIndicator())
                       : result.columns.isEmpty
-                          ? const Center(
+                          ? Center(
                               child: Text(
                                 '无数据',
                                 style: TextStyle(color: AppColors.textSecondary),
@@ -721,7 +733,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
           onPressed: (_selectedTable == null || _loadingQuery)
               ? null
               : () => _refreshTableData(quiet: false),
-          icon: const Icon(Icons.refresh, size: 18, color: AppColors.textSecondary),
+          icon: Icon(Icons.refresh, size: 18, color: AppColors.textSecondary),
           visualDensity: VisualDensity.compact,
           constraints: const BoxConstraints.tightFor(width: 32, height: 32),
           padding: EdgeInsets.zero,
@@ -743,7 +755,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
             child: DropdownButton<_TableRefreshMode>(
               value: _refreshMode,
               dropdownColor: AppColors.surfaceElevated,
-              style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
+              style: TextStyle(color: AppColors.textPrimary, fontSize: 13),
               items: _TableRefreshMode.values
                   .map(
                     (m) => DropdownMenuItem(
@@ -772,7 +784,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
               child: DropdownButton<int>(
                 value: _timedSeconds,
                 dropdownColor: AppColors.surfaceElevated,
-                style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 13),
                 items: const [2, 5, 10, 30]
                     .map(
                       (s) => DropdownMenuItem(value: s, child: Text('$s 秒')),
@@ -796,7 +808,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
             ),
           ),
           const SizedBox(width: 6),
-          const Text(
+          Text(
             '1 秒',
             style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
           ),
@@ -805,7 +817,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
           const SizedBox(width: 8),
           Text(
             lastText,
-            style: const TextStyle(fontSize: 11, color: AppColors.textMuted),
+            style: TextStyle(fontSize: 11, color: AppColors.textMuted),
           ),
         ],
       ],
@@ -835,7 +847,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                       DataColumn(
                         label: Text(
                           col,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontWeight: FontWeight.w600,
                             color: AppColors.textPrimary,
                           ),
@@ -910,7 +922,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Row(
                   children: [
-                    const Expanded(
+                    Expanded(
                       child: Text(
                         '查询控制台',
                         style: TextStyle(
@@ -932,7 +944,7 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
             ),
           ),
           if (_consoleExpanded) ...[
-            const Divider(height: 1, color: AppColors.border),
+            Divider(height: 1, color: AppColors.border),
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
@@ -940,14 +952,14 @@ class _DatabaseViewerPageState extends State<DatabaseViewerPage> {
                   controller: _queryController,
                   maxLines: null,
                   expands: true,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'Consolas',
                     fontSize: 13,
                     color: AppColors.textPrimary,
                   ),
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     border: InputBorder.none,
-                    hintText: 'SELECT * FROM table_name LIMIT 50;',
+                    hintText: 'SELECT * FROM table_name LIMIT $_queryLimit;',
                     hintStyle: TextStyle(color: AppColors.textMuted),
                     isCollapsed: true,
                   ),

@@ -259,7 +259,12 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
   Future<void> _download() async {
     final serial = _serial;
     if (serial == null || _selected.isEmpty) return;
-    final localDir = await _promptPath(context, '保存到本地文件夹', r'C:\Users\Public');
+    final localDir = await _promptPath(
+      context,
+      '保存到本地文件夹',
+      widget.state.settings.effectiveSaveDirectory,
+      initial: widget.state.settings.effectiveSaveDirectory,
+    );
     if (localDir == null || localDir.isEmpty) return;
     String? lastError;
     for (final remote in _selected) {
@@ -293,19 +298,14 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
   Future<void> _deleteSelected() async {
     final serial = _serial;
     if (serial == null || _selected.isEmpty) return;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.surfaceElevated,
-        title: const Text('删除所选内容？'),
-        content: Text('将删除 ${_selected.length} 项，此操作不可撤销。'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('删除')),
-        ],
-      ),
+    final ok = await confirmIfNeeded(
+      context,
+      needed: widget.state.settings.confirmDangerousActions,
+      title: '删除所选内容？',
+      message: '将删除 ${_selected.length} 项，此操作不可撤销。',
+      confirmLabel: '删除',
     );
-    if (ok != true) return;
+    if (!ok) return;
     try {
       await widget.state.adb.deletePaths(serial, _selected.toList());
       if (!mounted) return;
@@ -353,7 +353,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                         children: [
                           for (var i = 0; i < _segments.length; i++) ...[
                             if (i > 0)
-                              const Padding(
+                              Padding(
                                 padding: EdgeInsets.symmetric(horizontal: 8),
                                 child: Icon(
                                   Icons.chevron_right,
@@ -399,7 +399,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                       _currentPath.contains('/Android/data/')
                           ? '应用外部目录'
                           : '应用私有目录',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 11,
                         color: AppColors.accentOn,
                         fontWeight: FontWeight.w600,
@@ -470,7 +470,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                             },
                           ),
                         ),
-                        const Expanded(
+                        Expanded(
                           flex: 6,
                           child: Row(
                             children: [
@@ -480,8 +480,8 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                             ],
                           ),
                         ),
-                        const Expanded(flex: 2, child: Text('大小', style: _headerStyle)),
-                        const Expanded(flex: 3, child: Text('修改时间', style: _headerStyle)),
+                        Expanded(flex: 2, child: Text('大小', style: _headerStyle)),
+                        Expanded(flex: 3, child: Text('修改时间', style: _headerStyle)),
                       ],
                     ),
                   ),
@@ -527,7 +527,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                                               horizontal: 24,
                                               vertical: 12,
                                             ),
-                                            decoration: const BoxDecoration(
+                                            decoration: BoxDecoration(
                                               border: Border(
                                                 bottom: BorderSide(color: AppColors.borderSoft),
                                               ),
@@ -565,7 +565,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                                                         child: Text(
                                                           file.name,
                                                           overflow: TextOverflow.ellipsis,
-                                                          style: const TextStyle(
+                                                          style: TextStyle(
                                                             fontSize: 14,
                                                             color: AppColors.textPrimary,
                                                           ),
@@ -578,7 +578,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                                                   flex: 2,
                                                   child: Text(
                                                     file.sizeLabel,
-                                                    style: const TextStyle(
+                                                    style: TextStyle(
                                                       fontSize: 14,
                                                       color: AppColors.textSecondary,
                                                     ),
@@ -588,7 +588,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                                                   flex: 3,
                                                   child: Text(
                                                     file.modified,
-                                                    style: const TextStyle(
+                                                    style: TextStyle(
                                                       fontSize: 14,
                                                       color: AppColors.textSecondary,
                                                     ),
@@ -611,7 +611,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
             children: [
               Text(
                 '${files.length} 项（已选 ${_selected.length}）',
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 11,
                   letterSpacing: 0.5,
                   color: AppColors.textSecondary,
@@ -622,7 +622,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                 total <= 0
                     ? '可用空间：—'
                     : '可用空间：${free.toStringAsFixed(1)} GB / ${total.toStringAsFixed(0)} GB',
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 11,
                   letterSpacing: 0.5,
                   color: AppColors.textSecondary,
@@ -635,8 +635,15 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
     );
   }
 
-  Future<String?> _promptPath(BuildContext context, String title, String hint) {
-    final controller = TextEditingController(text: hint.contains(r'\') ? '' : hint);
+  Future<String?> _promptPath(
+    BuildContext context,
+    String title,
+    String hint, {
+    String? initial,
+  }) {
+    final controller = TextEditingController(
+      text: initial ?? (hint.contains('\\') ? '' : hint),
+    );
     return showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -659,7 +666,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
   }
 }
 
-const _headerStyle = TextStyle(
+final _headerStyle = TextStyle(
   fontSize: 14,
   fontWeight: FontWeight.w500,
   color: AppColors.textSecondary,

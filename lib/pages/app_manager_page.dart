@@ -174,19 +174,14 @@ class _AppManagerPageState extends State<AppManagerPage> {
   Future<void> _uninstall(AppInfo app) async {
     final serial = _serial;
     if (serial == null) return;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.surfaceElevated,
-        title: const Text('卸载应用？'),
-        content: Text('确定卸载 ${app.packageName}？'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('卸载')),
-        ],
-      ),
+    final ok = await confirmIfNeeded(
+      context,
+      needed: widget.state.settings.confirmDangerousActions,
+      title: '卸载应用？',
+      message: '确定卸载 ${app.packageName}？',
+      confirmLabel: '卸载',
     );
-    if (ok != true) return;
+    if (!ok) return;
     final error = await widget.state.adb.uninstallApp(serial, app.packageName);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -286,7 +281,7 @@ class _AppManagerPageState extends State<AppManagerPage> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
                 const SizedBox(width: 8),
-                const Text(
+                Text(
                   '正在解析应用名称…',
                   style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
                 ),
@@ -314,11 +309,11 @@ class _AppManagerPageState extends State<AppManagerPage> {
                 children: [
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                    decoration: const BoxDecoration(
+                    decoration: BoxDecoration(
                       color: Color(0xFF1E2021),
                       border: Border(bottom: BorderSide(color: AppColors.border)),
                     ),
-                    child: const Row(
+                    child: Row(
                       children: [
                         Expanded(flex: 3, child: Text('应用名称', style: _headerStyle)),
                         Expanded(flex: 4, child: Text('包名', style: _headerStyle)),
@@ -349,7 +344,7 @@ class _AppManagerPageState extends State<AppManagerPage> {
                                   )
                                 : ListView.separated(
                                     itemCount: apps.length,
-                                    separatorBuilder: (_, _) => const Divider(
+                                    separatorBuilder: (_, _) => Divider(
                                       height: 1,
                                       color: AppColors.border,
                                     ),
@@ -378,7 +373,7 @@ class _AppManagerPageState extends State<AppManagerPage> {
                                                         color: AppColors.chip,
                                                         borderRadius: BorderRadius.circular(8),
                                                       ),
-                                                      child: const Icon(
+                                                      child: Icon(
                                                         Icons.android,
                                                         color: AppColors.textSecondary,
                                                       ),
@@ -391,7 +386,7 @@ class _AppManagerPageState extends State<AppManagerPage> {
                                                           Text(
                                                             app.name,
                                                             overflow: TextOverflow.ellipsis,
-                                                            style: const TextStyle(
+                                                            style: TextStyle(
                                                               fontSize: 16,
                                                               fontWeight: FontWeight.w500,
                                                               color: AppColors.textPrimary,
@@ -399,7 +394,7 @@ class _AppManagerPageState extends State<AppManagerPage> {
                                                           ),
                                                           Text(
                                                             app.sizeLabel,
-                                                            style: const TextStyle(
+                                                            style: TextStyle(
                                                               fontSize: 12,
                                                               color: AppColors.textSecondary,
                                                             ),
@@ -420,7 +415,7 @@ class _AppManagerPageState extends State<AppManagerPage> {
                                                     child: Text(
                                                       app.packageName,
                                                       overflow: TextOverflow.ellipsis,
-                                                      style: const TextStyle(
+                                                      style: TextStyle(
                                                         fontSize: 13,
                                                         fontFamily: 'Consolas',
                                                         color: AppColors.textSecondary,
@@ -434,7 +429,7 @@ class _AppManagerPageState extends State<AppManagerPage> {
                                                 child: Text(
                                                   app.version,
                                                   overflow: TextOverflow.ellipsis,
-                                                  style: const TextStyle(
+                                                  style: TextStyle(
                                                     fontSize: 13,
                                                     fontFamily: 'Consolas',
                                                     color: AppColors.textSecondary,
@@ -515,7 +510,7 @@ class _AppManagerPageState extends State<AppManagerPage> {
 
 const _actionsWidth = 210.0;
 
-const _headerStyle = TextStyle(
+final _headerStyle = TextStyle(
   fontSize: 14,
   fontWeight: FontWeight.w500,
   color: AppColors.textSecondary,

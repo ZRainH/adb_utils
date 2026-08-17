@@ -90,7 +90,7 @@ class _CommandReferencePageState extends State<CommandReferencePage> {
             ),
             const SizedBox(height: 24),
             if (sections.isEmpty)
-              const Padding(
+              Padding(
                 padding: EdgeInsets.symmetric(vertical: 48),
                 child: Center(
                   child: Text(
@@ -133,7 +133,7 @@ class _CommandReferencePageState extends State<CommandReferencePage> {
                 },
               ),
             const SizedBox(height: 32),
-            const Text(
+            Text(
               '注意：执行命令前请确认目标设备已授权 USB 调试。'
               'root / remount / verity / 备份恢复等操作可能影响系统稳定性，请谨慎使用。'
               '部分命令依赖 Android 版本与 ROM 能力。',
@@ -188,7 +188,7 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.only(bottom: 24),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: AppColors.border)),
       ),
       child: Row(
@@ -198,7 +198,7 @@ class _Header extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'ADB 指令手册',
                   style: TextStyle(
                     fontSize: 32,
@@ -212,7 +212,7 @@ class _Header extends StatelessWidget {
                 Text(
                   '共 $totalCommands 条常用命令'
                   '${visibleCommands == totalCommands ? '' : ' · 当前显示 $visibleCommands 条'}',
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 16,
                     letterSpacing: 0.5,
                     color: AppColors.textSecondary,
@@ -226,7 +226,7 @@ class _Header extends StatelessWidget {
             width: 360,
             child: TextField(
               onChanged: onQueryChanged,
-              style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
+              style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
               decoration: InputDecoration(
                 hintText: "筛选命令（如 'logcat'、'pm'、'input'）…",
                 hintStyle: const TextStyle(
@@ -236,7 +236,7 @@ class _Header extends StatelessWidget {
                 ),
                 filled: true,
                 fillColor: AppColors.surfaceElevated,
-                prefixIcon: const Icon(
+                prefixIcon: Icon(
                   Icons.search,
                   size: 18,
                   color: AppColors.textSecondary,
@@ -247,15 +247,15 @@ class _Header extends StatelessWidget {
                 ),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(999),
-                  borderSide: const BorderSide(color: AppColors.border),
+                  borderSide: BorderSide(color: AppColors.border),
                 ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(999),
-                  borderSide: const BorderSide(color: AppColors.border),
+                  borderSide: BorderSide(color: AppColors.border),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(999),
-                  borderSide: const BorderSide(color: AppColors.accentBright),
+                  borderSide: BorderSide(color: AppColors.accentBright),
                 ),
               ),
             ),
@@ -286,7 +286,7 @@ class _SectionCard extends StatelessWidget {
         children: [
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               color: AppColors.surfaceMuted,
               border: Border(bottom: BorderSide(color: AppColors.border)),
             ),
@@ -297,7 +297,7 @@ class _SectionCard extends StatelessWidget {
                 Expanded(
                   child: Text(
                     section.title,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w500,
                       letterSpacing: 0.15,
@@ -307,7 +307,7 @@ class _SectionCard extends StatelessWidget {
                 ),
                 Text(
                   '${section.items.length}',
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 12,
                     color: AppColors.textSecondary,
                   ),
@@ -392,7 +392,7 @@ class _CommandBlockState extends State<_CommandBlock> {
                     AnimatedOpacity(
                       opacity: _hovered ? 1 : 0,
                       duration: const Duration(milliseconds: 120),
-                      child: const Padding(
+                      child: Padding(
                         padding: EdgeInsets.only(left: 8),
                         child: Icon(
                           Icons.copy_rounded,
@@ -428,7 +428,7 @@ class _DescriptionText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const style = TextStyle(
+    final style = TextStyle(
       fontSize: 13,
       height: 1.4,
       letterSpacing: 0.2,
@@ -458,7 +458,7 @@ class _DescriptionText extends StatelessWidget {
               ),
               child: Text(
                 codes[i],
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: 'Consolas',
                   fontSize: 12,
                   color: AppColors.textPrimary,

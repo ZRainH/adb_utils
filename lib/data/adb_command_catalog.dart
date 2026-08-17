@@ -34,7 +34,7 @@ List<AdbCommandSection> buildAdbCommandCatalog() {
   const green = Color(0xFFA8DAB5);
   const orange = Color(0xFFE6C07B);
 
-  return const [
+  return [
     AdbCommandSection(
       title: '基础与服务',
       icon: Icons.desktop_windows_outlined,

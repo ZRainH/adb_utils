@@ -196,6 +196,189 @@ class AdbService {
     }
   }
 
+  /// Full device profile for the details dialog.
+  Future<DeviceDetails> fetchDeviceDetails(String serial) async {
+    final props = await _shell(
+      serial,
+      [
+        'echo PROP',
+        'getprop ro.product.brand',
+        'getprop ro.product.manufacturer',
+        'getprop ro.product.model',
+        'getprop ro.product.device',
+        'getprop ro.product.name',
+        'getprop ro.build.version.release',
+        'getprop ro.build.version.sdk',
+        'getprop ro.build.version.security_patch',
+        'getprop ro.build.display.id',
+        'getprop ro.build.fingerprint',
+        'getprop ro.product.cpu.abi',
+        'getprop ro.product.cpu.abilist',
+        'getprop ro.serialno',
+        'getprop ro.hardware',
+        'getprop ro.product.board',
+        'getprop persist.sys.locale',
+        'getprop persist.sys.timezone',
+        'settings get secure android_id',
+        'echo SCREEN',
+        'wm size',
+        'wm density',
+        'echo BATTERY',
+        'dumpsys battery',
+        'echo NET',
+        'ip -f inet addr show wlan0 2>/dev/null || ip -f inet addr show eth0 2>/dev/null || true',
+        'dumpsys wifi 2>/dev/null | grep -m1 "mWifiInfo\\|SSID:" || true',
+        'echo UPTIME',
+        'cat /proc/uptime',
+      ].join('; '),
+      timeout: const Duration(seconds: 20),
+    );
+
+    final sections = _splitSections(props, const [
+      'PROP',
+      'SCREEN',
+      'BATTERY',
+      'NET',
+      'UPTIME',
+    ]);
+
+    final propLines = const LineSplitter()
+        .convert(sections['PROP'] ?? '')
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+
+    String? propAt(int i) {
+      if (i < 0 || i >= propLines.length) return null;
+      final v = propLines[i].trim();
+      if (v.isEmpty || v == 'null' || v == '[null]') return null;
+      return v;
+    }
+
+    final screen = sections['SCREEN'] ?? '';
+    final sizeMatch = RegExp(r'Physical size:\s*(\S+)').firstMatch(screen);
+    final densityMatch = RegExp(r'Physical density:\s*(\S+)').firstMatch(screen);
+
+    final batteryText = sections['BATTERY'] ?? '';
+    int? batInt(String key) {
+      final m = RegExp('$key:\\s*(-?\\d+)').firstMatch(batteryText);
+      return m == null ? null : int.tryParse(m.group(1)!);
+    }
+
+    String? batStatus() {
+      final code = batInt('status');
+      return switch (code) {
+        1 => '未知',
+        2 => '充电中',
+        3 => '放电中',
+        4 => '未充电',
+        5 => '已充满',
+        _ => code?.toString(),
+      };
+    }
+
+    String? batHealth() {
+      final code = batInt('health');
+      return switch (code) {
+        1 => '未知',
+        2 => '良好',
+        3 => '过热',
+        4 => '损坏',
+        5 => '过压',
+        6 => '未知故障',
+        7 => '过冷',
+        _ => code?.toString(),
+      };
+    }
+
+    final tempTenths = batInt('temperature');
+    final net = sections['NET'] ?? '';
+    final ipMatch = RegExp(r'inet\s+(\d+\.\d+\.\d+\.\d+)').firstMatch(net);
+    var ssid = RegExp(r'SSID:\s*([^,\n\]]+)').firstMatch(net)?.group(1)?.trim();
+    if (ssid != null) {
+      ssid = ssid.replaceAll('"', '').trim();
+      if (ssid == '<unknown ssid>' || ssid.isEmpty) ssid = null;
+    }
+
+    final uptimeParts = (sections['UPTIME'] ?? '').trim().split(RegExp(r'\s+'));
+    final uptimeRaw = uptimeParts.isEmpty ? null : uptimeParts.first;
+    final uptimeSecs = double.tryParse(uptimeRaw ?? '');
+    String? uptimeLabel;
+    if (uptimeSecs != null) {
+      final total = uptimeSecs.floor();
+      final d = total ~/ 86400;
+      final h = (total % 86400) ~/ 3600;
+      final m = (total % 3600) ~/ 60;
+      uptimeLabel = [
+        if (d > 0) '$d 天',
+        if (h > 0 || d > 0) '$h 小时',
+        '$m 分钟',
+      ].join(' ');
+    }
+
+    return DeviceDetails(
+      brand: propAt(0),
+      manufacturer: propAt(1),
+      model: propAt(2),
+      device: propAt(3),
+      marketName: propAt(4),
+      androidVersion: propAt(5),
+      sdkInt: propAt(6),
+      securityPatch: propAt(7),
+      buildId: propAt(8),
+      fingerprint: propAt(9),
+      abi: propAt(10),
+      abis: propAt(11),
+      serialNo: propAt(12),
+      hardware: propAt(13),
+      board: propAt(14),
+      locale: propAt(15),
+      timezone: propAt(16),
+      androidId: propAt(17),
+      screenSize: sizeMatch?.group(1),
+      screenDensity: densityMatch?.group(1),
+      batteryLevel: batInt('level'),
+      batteryStatus: batStatus(),
+      batteryHealth: batHealth(),
+      batteryTempC: tempTenths == null ? null : tempTenths / 10.0,
+      batteryVoltageMv: batInt('voltage'),
+      acPowered: batteryText.contains('AC powered: true'),
+      usbPowered: batteryText.contains('USB powered: true'),
+      wirelessPowered: batteryText.contains('Wireless powered: true'),
+      ipAddress: ipMatch?.group(1),
+      wifiSsid: ssid,
+      uptime: uptimeLabel,
+    );
+  }
+
+  Map<String, String> _splitSections(String text, List<String> markers) {
+    final result = <String, String>{};
+    final lines = const LineSplitter().convert(text);
+    String? current;
+    final buffer = StringBuffer();
+    void flush() {
+      final key = current;
+      if (key != null) {
+        result[key] = buffer.toString().trim();
+        buffer.clear();
+      }
+    }
+
+    for (final line in lines) {
+      final trimmed = line.trim();
+      if (markers.contains(trimmed)) {
+        flush();
+        current = trimmed;
+        continue;
+      }
+      if (current != null) {
+        buffer.writeln(line);
+      }
+    }
+    flush();
+    return result;
+  }
+
   Future<List<AppInfo>> listApps(
     String serial, {
     AppFilter filter = AppFilter.user,
@@ -872,6 +1055,33 @@ class AdbService {
       );
       if (result.exitCode == 0) return null;
       return '${result.stdout}\n${result.stderr}'.trim();
+    } catch (e) {
+      return e.toString();
+    }
+  }
+
+  Future<String> adbVersion() async {
+    try {
+      final result = await _run(['version']);
+      final text = result.stdout.toString().trim();
+      if (text.isEmpty) return result.stderr.toString().trim();
+      return text.split('\n').first.trim();
+    } catch (e) {
+      return '无法读取：$e';
+    }
+  }
+
+  Future<String?> captureScreenshot(String serial, String localPath) async {
+    final bytes = await _execOutBytes(
+      serial,
+      ['screencap', '-p'],
+      maxBytes: 32 * 1024 * 1024,
+    );
+    if (bytes == null || bytes.isEmpty) return '截图失败（设备可能不支持 screencap）';
+    try {
+      File(localPath).parent.createSync(recursive: true);
+      await File(localPath).writeAsBytes(bytes, flush: true);
+      return null;
     } catch (e) {
       return e.toString();
     }

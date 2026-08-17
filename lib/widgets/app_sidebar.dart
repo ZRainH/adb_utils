@@ -33,9 +33,15 @@ class AppSidebar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final surface = AppColors.surfaceOf(context);
+    final border = AppColors.borderOf(context);
+    final accentBright = AppColors.accentBrightOf(context);
     return Container(
       width: 80,
-      color: AppColors.surfaceDeep,
+      decoration: BoxDecoration(
+        color: surface,
+        border: Border(right: BorderSide(color: border)),
+      ),
       child: Column(
         children: [
           const SizedBox(height: 20),
@@ -47,7 +53,7 @@ class AppSidebar extends StatelessWidget {
               color: AppColors.accent,
               borderRadius: BorderRadius.circular(8),
             ),
-            child: const Text(
+            child: Text(
               'A',
               style: TextStyle(
                 color: AppColors.accentOn,
@@ -57,10 +63,10 @@ class AppSidebar extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          const Text(
+          Text(
             'ADB',
             style: TextStyle(
-              color: AppColors.accentBright,
+              color: accentBright,
               fontWeight: FontWeight.w700,
               fontSize: 12,
               letterSpacing: 1.2,
@@ -68,34 +74,30 @@ class AppSidebar extends StatelessWidget {
           ),
           const SizedBox(height: 28),
           Expanded(
-            child: ListView.separated(
+            child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10),
-              itemCount: items.length,
-              separatorBuilder: (_, _) => const SizedBox(height: 8),
-              itemBuilder: (context, index) {
-                final item = items[index];
-                final selected = index == selectedIndex;
-                return _NavTile(
-                  item: item,
-                  selected: selected,
-                  onTap: () => onSelect(index),
-                );
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 20),
-            child: _NavTile(
-              item: const SidebarNavItem(
-                icon: Icons.settings_outlined,
-                label: '设置',
+              child: Column(
+                children: [
+                  for (var i = 0; i < items.length; i++) ...[
+                    if (i > 0) const SizedBox(height: 8),
+                    _NavTile(
+                      item: items[i],
+                      selected: i == selectedIndex,
+                      onTap: () => onSelect(i),
+                    ),
+                  ],
+                  const Spacer(),
+                  _NavTile(
+                    item: const SidebarNavItem(
+                      icon: Icons.settings_outlined,
+                      label: '设置',
+                    ),
+                    selected: selectedIndex == 6,
+                    onTap: () => onSelect(6),
+                  ),
+                  const SizedBox(height: 20),
+                ],
               ),
-              selected: false,
-              onTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('设置功能即将推出')),
-                );
-              },
             ),
           ),
         ],
@@ -117,6 +119,10 @@ class _NavTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chip = AppColors.chipOf(context);
+    final accentBright = AppColors.accentBrightOf(context);
+    final textPrimary = AppColors.textPrimaryOf(context);
+    final textSecondary = AppColors.textSecondaryOf(context);
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -124,22 +130,24 @@ class _NavTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
+          width: double.infinity,
           padding: const EdgeInsets.symmetric(vertical: 10),
           decoration: BoxDecoration(
-            color: selected ? AppColors.chip.withValues(alpha: 0.7) : Colors.transparent,
+            color: selected ? chip.withValues(alpha: 0.85) : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
             border: selected
-                ? const Border(
-                    left: BorderSide(color: AppColors.accentBright, width: 2),
+                ? Border(
+                    left: BorderSide(color: accentBright, width: 2),
                   )
                 : null,
           ),
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
                 item.icon,
                 size: 22,
-                color: selected ? AppColors.accentBright : AppColors.textSecondary,
+                color: selected ? accentBright : textSecondary,
               ),
               const SizedBox(height: 6),
               Text(
@@ -150,7 +158,7 @@ class _NavTile extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 10,
                   height: 1.1,
-                  color: selected ? AppColors.textPrimary : AppColors.textSecondary,
+                  color: selected ? textPrimary : textSecondary,
                   fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
                 ),
               ),

@@ -18,8 +18,7 @@ class TerminalPage extends StatefulWidget {
 }
 
 class _TerminalPageState extends State<TerminalPage> {
-  static const _maxLogs = 3000;
-  static const _maxFilteredKeep = 2000;
+  static const _maxFilteredKeepRatio = 2 / 3;
 
   final _filterController = TextEditingController();
   final _commandController = TextEditingController(text: 'shell input tap 500 500');
@@ -33,8 +32,16 @@ class _TerminalPageState extends State<TerminalPage> {
   String _filter = '';
   String? _boundSerial;
   String? _streamError;
+  String? _boundDefaultLevel;
 
   String? get _serial => widget.state.selectedDevice?.id;
+
+  int get _maxLogs => widget.state.settings.logcatBufferSize.clamp(200, 20000);
+
+  int get _maxFilteredKeep =>
+      (_maxLogs * _maxFilteredKeepRatio).round().clamp(200, _maxLogs);
+
+  double get _fontSize => widget.state.settings.terminalFontSize;
 
   bool get _hasFilter =>
       _filter.trim().isNotEmpty || _levelFilter != null;
@@ -43,6 +50,8 @@ class _TerminalPageState extends State<TerminalPage> {
   void initState() {
     super.initState();
     _boundSerial = _serial;
+    _levelFilter = LogLevel.fromName(widget.state.settings.defaultLogLevel);
+    _boundDefaultLevel = widget.state.settings.defaultLogLevel;
     widget.state.addListener(_onState);
     _scrollController.addListener(_onUserScroll);
     _startLogcat();
@@ -67,6 +76,11 @@ class _TerminalPageState extends State<TerminalPage> {
       _boundSerial = serial;
       _startLogcat();
       return;
+    }
+    final defaultLevel = widget.state.settings.defaultLogLevel;
+    if (defaultLevel != _boundDefaultLevel) {
+      _boundDefaultLevel = defaultLevel;
+      _levelFilter = LogLevel.fromName(defaultLevel);
     }
     // Sync top-bar search into log filter when on this page.
     final global = widget.state.searchQuery;
@@ -260,23 +274,23 @@ class _TerminalPageState extends State<TerminalPage> {
                     child: TextField(
                       controller: _filterController,
                       onChanged: (v) => setState(() => _filter = v),
-                      style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
+                      style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
                       decoration: InputDecoration(
                         hintText: '按包名、标签、PID 或内容筛选…',
                         filled: true,
                         fillColor: AppColors.surfaceMuted,
-                        prefixIcon: const Icon(
+                        prefixIcon: Icon(
                           Icons.search,
                           size: 16,
                           color: AppColors.textSecondary,
                         ),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: AppColors.border),
+                          borderSide: BorderSide(color: AppColors.border),
                         ),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: AppColors.border),
+                          borderSide: BorderSide(color: AppColors.border),
                         ),
                       ),
                     ),
@@ -294,7 +308,7 @@ class _TerminalPageState extends State<TerminalPage> {
                     child: DropdownButton<LogLevel?>(
                       value: _levelFilter,
                       dropdownColor: AppColors.surfaceElevated,
-                      style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
+                      style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
                       items: const [
                         DropdownMenuItem(value: null, child: Text('全部级别')),
                         DropdownMenuItem(value: LogLevel.verbose, child: Text('详细')),
@@ -317,7 +331,7 @@ class _TerminalPageState extends State<TerminalPage> {
                       onChanged: _setAutoScroll,
                     ),
                     const SizedBox(width: 4),
-                    const Text(
+                    Text(
                       '自动滚动',
                       style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
                     ),
@@ -344,15 +358,15 @@ class _TerminalPageState extends State<TerminalPage> {
                 children: [
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    decoration: const BoxDecoration(
+                    decoration: BoxDecoration(
                       color: AppColors.surfaceMuted,
                       border: Border(bottom: BorderSide(color: AppColors.border)),
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.terminal, size: 14, color: AppColors.textSecondary),
+                        Icon(Icons.terminal, size: 14, color: AppColors.textSecondary),
                         const SizedBox(width: 8),
-                        const Text(
+                        Text(
                           'ADB 日志',
                           style: TextStyle(
                             fontSize: 11,
@@ -380,7 +394,7 @@ class _TerminalPageState extends State<TerminalPage> {
                             onAction: _startLogcat,
                           )
                         : logs.isEmpty
-                            ? const Center(
+                            ? Center(
                                 child: Text(
                                   '等待 logcat 输出…',
                                   style: TextStyle(color: AppColors.textSecondary),
@@ -409,7 +423,7 @@ class _TerminalPageState extends State<TerminalPage> {
                                       TextSpan(
                                         style: TextStyle(
                                           fontFamily: 'Consolas',
-                                          fontSize: 13,
+                                          fontSize: _fontSize,
                                           height: 1.6,
                                           color: entry.color,
                                         ),
@@ -457,11 +471,11 @@ class _TerminalPageState extends State<TerminalPage> {
           const SizedBox(height: 12),
           Row(
             children: [
-              const Text(
+              Text(
                 '>> adb',
                 style: TextStyle(
                   fontFamily: 'Consolas',
-                  fontSize: 14,
+                  fontSize: _fontSize + 1,
                   color: AppColors.accentBright,
                 ),
               ),
@@ -469,9 +483,9 @@ class _TerminalPageState extends State<TerminalPage> {
               Expanded(
                 child: TextField(
                   controller: _commandController,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'Consolas',
-                    fontSize: 14,
+                    fontSize: _fontSize + 1,
                     color: AppColors.textPrimary,
                   ),
                   onSubmitted: (_) => _execute(),
@@ -485,15 +499,15 @@ class _TerminalPageState extends State<TerminalPage> {
                         _historyIndex = (_historyIndex + 1) % _history.length;
                         _commandController.text = _history[_historyIndex];
                       },
-                      icon: const Icon(Icons.history, size: 18, color: AppColors.textSecondary),
+                      icon: Icon(Icons.history, size: 18, color: AppColors.textSecondary),
                     ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: AppColors.border),
+                      borderSide: BorderSide(color: AppColors.border),
                     ),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: AppColors.border),
+                      borderSide: BorderSide(color: AppColors.border),
                     ),
                   ),
                 ),

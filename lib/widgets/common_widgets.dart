@@ -121,6 +121,35 @@ class ActionButton extends StatelessWidget {
   }
 }
 
+Future<bool> confirmIfNeeded(
+  BuildContext context, {
+  required bool needed,
+  required String title,
+  required String message,
+  String confirmLabel = '确定',
+}) async {
+  if (!needed) return true;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      backgroundColor: AppColors.surfaceElevated,
+      title: Text(title),
+      content: Text(message),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('取消'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(confirmLabel),
+        ),
+      ],
+    ),
+  );
+  return ok == true;
+}
+
 class PanelCard extends StatelessWidget {
   const PanelCard({
     super.key,
@@ -133,14 +162,17 @@ class PanelCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: padding,
-      decoration: BoxDecoration(
-        color: AppColors.surfaceElevated,
+    return Material(
+      color: AppColors.surfaceElevated,
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
-      child: child,
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: padding,
+        child: child,
+      ),
     );
   }
 }

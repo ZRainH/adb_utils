@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'app_settings.dart';
+
 /// Resolves bundled Android platform-tools next to the app executable.
 abstract final class ToolPaths {
   static String? _adb;
@@ -60,6 +62,45 @@ abstract final class ToolPaths {
 
     _adb = Platform.isWindows ? 'adb.exe' : 'adb';
     return _adb!;
+  }
+
+  static void clearCache() {
+    _adb = null;
+    _sqlite3 = null;
+    _platformToolsDir = null;
+  }
+
+  static String bundledAdbPath() {
+    final adbName = Platform.isWindows ? 'adb.exe' : 'adb';
+    return '$platformToolsDir${Platform.pathSeparator}$adbName';
+  }
+
+  static String resolveAdbFor({
+    required AdbPathMode mode,
+    String customPath = '',
+  }) {
+    clearCache();
+    final adbName = Platform.isWindows ? 'adb.exe' : 'adb';
+    switch (mode) {
+      case AdbPathMode.custom:
+        final p = customPath.trim();
+        if (p.isNotEmpty && File(p).existsSync()) return p;
+        break;
+      case AdbPathMode.system:
+        for (final env in ['ANDROID_HOME', 'ANDROID_SDK_ROOT']) {
+          final root = Platform.environment[env];
+          if (root == null || root.isEmpty) continue;
+          final sdkAdb = File(
+            '$root${Platform.pathSeparator}platform-tools'
+            '${Platform.pathSeparator}$adbName',
+          );
+          if (sdkAdb.existsSync()) return sdkAdb.path;
+        }
+        return adbName;
+      case AdbPathMode.bundled:
+        break;
+    }
+    return resolveAdb();
   }
 
   static String resolveSqlite3() {
