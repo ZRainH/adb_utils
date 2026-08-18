@@ -140,6 +140,7 @@ class TopHeader extends StatelessWidget {
               constraints: const BoxConstraints(maxWidth: 240, minWidth: 120),
               child: TextField(
                 onChanged: state.setSearch,
+                onSubmitted: state.submitSearch,
                 style: TextStyle(fontSize: 14, color: textPrimary),
                 decoration: InputDecoration(
                   hintText: searchHint,

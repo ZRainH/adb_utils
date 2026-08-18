@@ -19,7 +19,7 @@ class AppSettings {
     this.lastDeviceId = '',
     this.autoSelectOnConnect = true,
     this.devicePollSeconds = 2,
-    this.logcatBufferSize = 3000,
+    this.logcatCycleBufferKb = 1024,
     this.defaultLogLevel,
     this.dbRefreshMode = DbRefreshPref.off,
     this.dbRefreshSeconds = 5,
@@ -29,7 +29,8 @@ class AppSettings {
     this.terminalFontSize = 13,
     this.screenshotHotkey = ScreenshotHotkey.f5,
     this.confirmDangerousActions = true,
-  });
+    List<String>? logcatSearchHistory,
+  }) : logcatSearchHistory = List<String>.from(logcatSearchHistory ?? []);
 
   AdbPathMode adbPathMode;
   String customAdbPath;
@@ -39,7 +40,7 @@ class AppSettings {
   String lastDeviceId;
   bool autoSelectOnConnect;
   int devicePollSeconds;
-  int logcatBufferSize;
+  int logcatCycleBufferKb;
   String? defaultLogLevel;
   DbRefreshPref dbRefreshMode;
   int dbRefreshSeconds;
@@ -49,6 +50,9 @@ class AppSettings {
   double terminalFontSize;
   ScreenshotHotkey screenshotHotkey;
   bool confirmDangerousActions;
+  List<String> logcatSearchHistory;
+
+  static const int maxLogcatSearchHistory = 20;
 
   static String defaultDownloads() {
     final sep = Platform.pathSeparator;
@@ -141,7 +145,7 @@ class AppSettings {
         'autoSelectOnConnect': autoSelectOnConnect,
         'devicePollSeconds': devicePollSeconds,
         'devicePollMigratedV2': true,
-        'logcatBufferSize': logcatBufferSize,
+        'logcatCycleBufferKb': logcatCycleBufferKb,
         'defaultLogLevel': defaultLogLevel,
         'dbRefreshMode': dbRefreshMode.name,
         'dbRefreshSeconds': dbRefreshSeconds,
@@ -151,6 +155,7 @@ class AppSettings {
         'terminalFontSize': terminalFontSize,
         'screenshotHotkey': screenshotHotkey.name,
         'confirmDangerousActions': confirmDangerousActions,
+        'logcatSearchHistory': logcatSearchHistory,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
@@ -173,7 +178,7 @@ class AppSettings {
         if (v == 0 && json['devicePollMigratedV2'] != true) return 2;
         return v;
       }(),
-      logcatBufferSize: json['logcatBufferSize'] as int? ?? 3000,
+      logcatCycleBufferKb: _logcatCycleBufferKbFromJson(json),
       defaultLogLevel: _validLogLevel(json['defaultLogLevel'] as String?),
       dbRefreshMode: DbRefreshPref.values.firstWhere(
         (e) => e.name == json['dbRefreshMode'],
@@ -192,7 +197,41 @@ class AppSettings {
         orElse: () => ScreenshotHotkey.f5,
       ),
       confirmDangerousActions: json['confirmDangerousActions'] as bool? ?? true,
+      logcatSearchHistory: List<String>.from(
+        (json['logcatSearchHistory'] as List?)
+                ?.map((e) => e.toString())
+                .where((e) => e.trim().isNotEmpty) ??
+            const [],
+      ),
     );
+  }
+
+  void pushLogcatSearchHistory(String query) {
+    final q = query.trim();
+    if (q.isEmpty) return;
+    final history = List<String>.from(logcatSearchHistory);
+    history.removeWhere((e) => e == q);
+    history.insert(0, q);
+    if (history.length > maxLogcatSearchHistory) {
+      history.removeRange(maxLogcatSearchHistory, history.length);
+    }
+    logcatSearchHistory = history;
+  }
+
+  void clearLogcatSearchHistory() {
+    logcatSearchHistory = [];
+  }
+
+  static int _logcatCycleBufferKbFromJson(Map<String, dynamic> json) {
+    final kb = json['logcatCycleBufferKb'] as int?;
+    if (kb != null) return kb.clamp(0, 65536);
+    // Legacy: logcatBufferSize stored max line count.
+    return switch (json['logcatBufferSize'] as int?) {
+      1000 => 512,
+      8000 => 4096,
+      null => 1024,
+      _ => 1024,
+    };
   }
 
   static String? _validLogLevel(String? name) {

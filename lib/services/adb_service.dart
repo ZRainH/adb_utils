@@ -7,6 +7,7 @@ import '../models/app_info.dart';
 import '../models/device_info.dart';
 import '../models/file_entry.dart';
 import '../models/log_entry.dart';
+import '../models/logcat_options.dart';
 import 'apk_label_parser.dart';
 
 class StorageMetrics {
@@ -56,6 +57,10 @@ class AdbService {
 
   final String adbPath;
   Process? _logcatProcess;
+  static const _logcatUtf8Decoder = Utf8Decoder(allowMalformed: true);
+  static final _logLineRe = RegExp(
+    r'^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]+):\s?(.*)$',
+  );
 
   Future<ProcessResult> _run(
     List<String> args, {
@@ -1424,24 +1429,28 @@ class AdbService {
     }
   }
 
-  Stream<LogEntry> startLogcat(String serial) {
+  Stream<LogEntry> startLogcat(
+    String serial, {
+    LogcatBuffer buffer = LogcatBuffer.main,
+    LogLevel? minLevel,
+  }) {
     final controller = StreamController<LogEntry>();
     () async {
       try {
         await stopLogcat();
-        // Warm process map so package filters work ASAP.
         unawaited(_refreshPidPackageMap(serial));
         _pidMapTimer?.cancel();
-        _pidMapTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+        _pidMapTimer = Timer.periodic(const Duration(seconds: 5), (_) {
           unawaited(_refreshPidPackageMap(serial));
         });
 
+        final levelArg = _logcatLevelArg(minLevel);
         _logcatProcess = await Process.start(
           adbPath,
-          ['-s', serial, 'logcat', '-v', 'threadtime'],
+          ['-s', serial, 'logcat', '-v', 'brief', '-b', buffer.id, levelArg],
         );
         _logcatProcess!.stdout
-            .transform(utf8.decoder)
+            .transform(_logcatUtf8Decoder)
             .transform(const LineSplitter())
             .listen(
           (line) {
@@ -1458,8 +1467,9 @@ class AdbService {
             _pidMapTimer = null;
             if (!controller.isClosed) controller.close();
           },
+          cancelOnError: false,
         );
-        _logcatProcess!.stderr.transform(utf8.decoder).listen((_) {});
+        _logcatProcess!.stderr.transform(_logcatUtf8Decoder).listen((_) {});
       } catch (e, st) {
         _pidMapTimer?.cancel();
         _pidMapTimer = null;
@@ -1478,6 +1488,13 @@ class AdbService {
     _logcatProcess?.kill();
     _logcatProcess = null;
   }
+
+  Future<void> clearLogcatBuffer(String serial) async {
+    await _run(['-s', serial, 'logcat', '-c']);
+  }
+
+  /// Running process names keyed by pid (for package filter hints).
+  Map<String, String> get runningProcesses => Map.unmodifiable(_pidToPackage);
 
   /// pid -> package/process name, refreshed while logcat is running.
   final Map<String, String> _pidToPackage = {};
@@ -1555,11 +1572,32 @@ class AdbService {
     }
   }
 
+  String _logcatLevelArg(LogLevel? minLevel) {
+    final code = switch (minLevel) {
+      LogLevel.debug => 'D',
+      LogLevel.info => 'I',
+      LogLevel.warning => 'W',
+      LogLevel.error => 'E',
+      _ => 'V',
+    };
+    return '*:$code';
+  }
+
   LogEntry? _parseLogLine(String line) {
-    final re = RegExp(
-      r'^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]+):\s?(.*)$',
-    );
-    final m = re.firstMatch(line);
+    // brief: "I/tag(pid): message"  or  "MM-DD HH:MM:SS.mmm  pid tid I tag: msg"
+    final brief = RegExp(r'^([VDIWEF])\/([^(:]+)\(\s*(\d+)\):\s?(.*)$').firstMatch(line);
+    if (brief != null) {
+      return LogEntry(
+        timestamp: _nowLogStamp(),
+        pid: brief.group(3)!,
+        tid: brief.group(3)!,
+        level: _levelFromCode(brief.group(1)!),
+        tag: brief.group(2)!.trim(),
+        message: brief.group(4) ?? '',
+      );
+    }
+
+    final m = _logLineRe.firstMatch(line);
     if (m == null) return null;
     return LogEntry(
       timestamp: m.group(1)!,
@@ -1569,6 +1607,12 @@ class AdbService {
       tag: m.group(5)!.trim(),
       message: m.group(6) ?? '',
     );
+  }
+
+  String _nowLogStamp() {
+    final n = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(n.month)}-${two(n.day)} ${two(n.hour)}:${two(n.minute)}:${two(n.second)}.${n.millisecond.toString().padLeft(3, '0')}';
   }
 
   LogLevel _levelFromCode(String code) {

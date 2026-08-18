@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/log_entry.dart';
+import '../models/logcat_options.dart';
 import '../services/app_state.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common_widgets.dart';
@@ -18,39 +21,47 @@ class TerminalPage extends StatefulWidget {
 }
 
 class _TerminalPageState extends State<TerminalPage> {
-  static const _maxFilteredKeepRatio = 2 / 3;
+  static const _stampTailCount = 80;
 
   final _filterController = TextEditingController();
-  final _commandController = TextEditingController(text: 'shell input tap 500 500');
   final _scrollController = ScrollController();
-  final List<LogEntry> _logs = [];
-  final List<String> _history = [];
-  int _historyIndex = -1;
+  final _listNotifier = ValueNotifier<List<LogEntry>>(const []);
+  final _logs = <LogEntry>[];
+  final _pending = <LogEntry>[];
   StreamSubscription<LogEntry>? _sub;
-  LogLevel? _levelFilter;
+  LogLevel? _minLevel;
+  final LogcatBuffer _buffer = LogcatBuffer.main;
   bool _autoScroll = true;
+  bool _paused = false;
   String _filter = '';
+  String _filterLower = '';
   String? _boundSerial;
   String? _streamError;
   String? _boundDefaultLevel;
+  Timer? _flushTimer;
+  Timer? _filterDebounce;
+  bool _isProgrammaticScroll = false;
+  List<LogEntry> _visibleLogs = const [];
+  int _logBufferBytes = 0;
 
   String? get _serial => widget.state.selectedDevice?.id;
 
-  int get _maxLogs => widget.state.settings.logcatBufferSize.clamp(200, 20000);
+  int get _cycleBufferKb => widget.state.settings.logcatCycleBufferKb;
 
-  int get _maxFilteredKeep =>
-      (_maxLogs * _maxFilteredKeepRatio).round().clamp(200, _maxLogs);
+  String get _bufferLimitLabel =>
+      _cycleBufferKb <= 0 ? '不限制' : '$_cycleBufferKb KB';
+
+  int _entryBytes(LogEntry entry) => utf8.encode(entry.fullLine).length + 1;
 
   double get _fontSize => widget.state.settings.terminalFontSize;
 
-  bool get _hasFilter =>
-      _filter.trim().isNotEmpty || _levelFilter != null;
+  bool get _hasDisplayFilter => _filterLower.isNotEmpty || _minLevel != null;
 
   @override
   void initState() {
     super.initState();
     _boundSerial = _serial;
-    _levelFilter = LogLevel.fromName(widget.state.settings.defaultLogLevel);
+    _minLevel = LogLevel.fromName(widget.state.settings.defaultLogLevel);
     _boundDefaultLevel = widget.state.settings.defaultLogLevel;
     widget.state.addListener(_onState);
     _scrollController.addListener(_onUserScroll);
@@ -61,11 +72,13 @@ class _TerminalPageState extends State<TerminalPage> {
   void dispose() {
     widget.state.removeListener(_onState);
     _scrollController.removeListener(_onUserScroll);
+    _flushTimer?.cancel();
+    _filterDebounce?.cancel();
     _sub?.cancel();
     widget.state.adb.stopLogcat();
     _filterController.dispose();
-    _commandController.dispose();
     _scrollController.dispose();
+    _listNotifier.dispose();
     super.dispose();
   }
 
@@ -77,30 +90,132 @@ class _TerminalPageState extends State<TerminalPage> {
       _startLogcat();
       return;
     }
+    if (_paused) return;
+
     final defaultLevel = widget.state.settings.defaultLogLevel;
     if (defaultLevel != _boundDefaultLevel) {
       _boundDefaultLevel = defaultLevel;
-      _levelFilter = LogLevel.fromName(defaultLevel);
+      final next = LogLevel.fromName(defaultLevel);
+      if (next != _minLevel) {
+        _minLevel = next;
+        _startLogcat();
+      }
     }
-    // Sync top-bar search into log filter when on this page.
+
     final global = widget.state.searchQuery;
     if (global != _filter && global != _filterController.text) {
       _filterController.text = global;
-      setState(() => _filter = global);
-      return;
+      _applyFilter(global);
     }
-    // Process map may have updated — stamp missing package names.
-    if (_stampMissingPackages()) {
-      setState(() {});
-      return;
-    }
-    setState(() {});
   }
 
-  /// reverse:true ListView：offset==0 表示底部（最新日志）。
+  void _applyFilter(String value, {bool immediate = false}) {
+    _filter = value;
+    _filterLower = value.toLowerCase().trim();
+    _filterDebounce?.cancel();
+    if (immediate) {
+      _rebuildVisibleLogs();
+      _publishLogs();
+      return;
+    }
+    _filterDebounce = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted) return;
+      _rebuildVisibleLogs();
+      _publishLogs();
+    });
+  }
+
+  void _commitSearchHistory(String value) {
+    widget.state.submitSearch(value);
+    if (mounted) setState(() {});
+  }
+
+  void _selectSearchHistory(String value) {
+    _filterController.text = value;
+    widget.state.setSearch(value);
+    _applyFilter(value, immediate: true);
+  }
+
+  Widget _searchHistorySuffix() {
+    final history = widget.state.settings.logcatSearchHistory;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_filter.isNotEmpty)
+          IconButton(
+            tooltip: '清除',
+            icon: Icon(Icons.close, size: 16, color: AppColors.textSecondary),
+            onPressed: () {
+              _filterController.clear();
+              widget.state.setSearch('');
+              _applyFilter('', immediate: true);
+            },
+          ),
+        PopupMenuButton<String>(
+          tooltip: '搜索历史',
+          padding: EdgeInsets.zero,
+          icon: Icon(Icons.arrow_drop_down, size: 20, color: AppColors.textSecondary),
+          color: AppColors.surfaceElevated,
+          onSelected: (value) async {
+            if (value == '__clear__') {
+              await widget.state.clearLogcatSearchHistory();
+              if (mounted) setState(() {});
+              return;
+            }
+            _selectSearchHistory(value);
+          },
+          itemBuilder: (context) {
+            if (history.isEmpty) {
+              return [
+                PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text(
+                    '暂无历史',
+                    style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                  ),
+                ),
+              ];
+            }
+            return [
+              ...history.map(
+                (item) => PopupMenuItem<String>(
+                  value: item,
+                  child: Text(item, overflow: TextOverflow.ellipsis),
+                ),
+              ),
+              PopupMenuItem<String>(
+                value: '__clear__',
+                child: Text(
+                  '清空历史',
+                  style: TextStyle(color: AppColors.errorLog),
+                ),
+              ),
+            ];
+          },
+        ),
+      ],
+    );
+  }
+
+  void _publishLogs() {
+    _listNotifier.value = _visibleLogs;
+  }
+
+  void _rebuildVisibleLogs() {
+    if (!_hasDisplayFilter) {
+      _visibleLogs = List<LogEntry>.unmodifiable(_logs);
+      return;
+    }
+    _visibleLogs = List<LogEntry>.unmodifiable([
+      for (final e in _logs)
+        if (e.matchesFast(_filterLower, _minLevel)) e,
+    ]);
+  }
+
   void _onUserScroll() {
-    if (!_scrollController.hasClients || !_autoScroll) return;
-    // 用户往上翻离开底部时，自动关闭「贴底滚动」。
+    if (_isProgrammaticScroll || !_scrollController.hasClients || !_autoScroll || _paused) {
+      return;
+    }
     if (_scrollController.offset > 48) {
       setState(() => _autoScroll = false);
     }
@@ -108,80 +223,65 @@ class _TerminalPageState extends State<TerminalPage> {
 
   void _setAutoScroll(bool enabled) {
     setState(() => _autoScroll = enabled);
-    if (enabled) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+    if (enabled && !_paused) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _autoScroll && !_paused) _stickToBottom();
+      });
     }
   }
 
-  void _scrollToBottom() {
-    if (!_autoScroll || !_scrollController.hasClients) return;
+  void _stickToBottom() {
+    if (!_scrollController.hasClients || _paused) return;
+    _isProgrammaticScroll = true;
     _scrollController.jumpTo(0);
+    _isProgrammaticScroll = false;
   }
 
-  LogEntry _withPackage(LogEntry entry) {
-    if (entry.packageName != null && entry.packageName!.isNotEmpty) return entry;
-    final pkg = widget.state.adb.packageForPid(entry.pid);
-    if (pkg == null || pkg.isEmpty) return entry;
-    return entry.copyWith(packageName: pkg);
-  }
-
-  /// Permanently write discovered package names onto buffered entries.
-  bool _stampMissingPackages() {
-    var changed = false;
-    for (var i = 0; i < _logs.length; i++) {
+  void _stampRecentPackages() {
+    if (_logs.isEmpty) return;
+    final start = _logs.length > _stampTailCount ? _logs.length - _stampTailCount : 0;
+    for (var i = start; i < _logs.length; i++) {
       final e = _logs[i];
       if (e.packageName != null && e.packageName!.isNotEmpty) continue;
       final pkg = widget.state.adb.packageForPid(e.pid);
       if (pkg == null || pkg.isEmpty) continue;
       _logs[i] = e.copyWith(packageName: pkg);
-      changed = true;
     }
-    return changed;
   }
 
-  void _appendLog(LogEntry entry) {
-    _logs.add(_withPackage(entry));
+  void _flushBatch() {
+    _flushTimer = null;
+    if (!mounted || _paused || _pending.isEmpty) return;
+
+    _logs.addAll(_pending);
+    for (final entry in _pending) {
+      _logBufferBytes += _entryBytes(entry);
+    }
+    _pending.clear();
     _trimLogs();
+    _stampRecentPackages();
+    _rebuildVisibleLogs();
+    _publishLogs();
+
+    if (_autoScroll && !_paused) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _autoScroll && !_paused) _stickToBottom();
+      });
+    }
   }
 
-  /// Drop oldest logs, but when filtering prefer dropping non-matches first
-  /// so filtered results don't vanish under log flood.
+  void _scheduleBatchFlush() {
+    if (_paused) return;
+    _flushTimer ??= Timer(const Duration(milliseconds: 180), _flushBatch);
+  }
+
   void _trimLogs() {
-    if (!_hasFilter) {
-      if (_logs.length > _maxLogs) {
-        _logs.removeRange(0, _logs.length - _maxLogs);
-      }
-      return;
-    }
-
-    if (_logs.length > _maxLogs) {
-      final removeIdx = <int>[];
-      var excess = _logs.length - _maxLogs;
-      for (var i = 0; i < _logs.length && excess > 0; i++) {
-        if (!_logs[i].matches(_filter, _levelFilter)) {
-          removeIdx.add(i);
-          excess--;
-        }
-      }
-      for (var i = removeIdx.length - 1; i >= 0; i--) {
-        _logs.removeAt(removeIdx[i]);
-      }
-    }
-
-    if (_logs.length > _maxFilteredKeep) {
-      // Still over: all (or mostly) matches — keep the newest matches.
-      final matching = <LogEntry>[];
-      for (final e in _logs) {
-        if (e.matches(_filter, _levelFilter)) matching.add(e);
-      }
-      if (matching.length > _maxFilteredKeep) {
-        final keep = matching.sublist(matching.length - _maxFilteredKeep);
-        _logs
-          ..clear()
-          ..addAll(keep);
-      } else if (_logs.length > _maxFilteredKeep) {
-        _logs.removeRange(0, _logs.length - _maxFilteredKeep);
-      }
+    // 按循环缓冲上限（KB）丢弃最旧日志；搜索/级别只影响显示，不影响缓冲容量。
+    final maxKb = _cycleBufferKb;
+    if (maxKb <= 0) return;
+    final maxBytes = maxKb * 1024;
+    while (_logs.isNotEmpty && _logBufferBytes > maxBytes) {
+      _logBufferBytes -= _entryBytes(_logs.removeAt(0));
     }
   }
 
@@ -189,22 +289,29 @@ class _TerminalPageState extends State<TerminalPage> {
     await widget.state.adb.stopLogcat();
     await _sub?.cancel();
     _sub = null;
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _pending.clear();
     if (!mounted) return;
     setState(() {
       _logs.clear();
+      _visibleLogs = const [];
       _streamError = null;
+      _paused = false;
+      _logBufferBytes = 0;
     });
+    _listNotifier.value = const [];
 
     final serial = _serial;
     if (serial == null) return;
 
-    _sub = widget.state.adb.startLogcat(serial).listen(
+    _sub = widget.state.adb
+        .startLogcat(serial, buffer: _buffer, minLevel: _minLevel)
+        .listen(
       (entry) {
-        if (!mounted) return;
-        setState(() => _appendLog(entry));
-        if (_autoScroll) {
-          WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
-        }
+        if (!mounted || _paused) return;
+        _pending.add(entry);
+        _scheduleBatchFlush();
       },
       onError: (Object e) {
         if (!mounted) return;
@@ -213,40 +320,31 @@ class _TerminalPageState extends State<TerminalPage> {
     );
   }
 
-  List<LogEntry> get _visible {
-    _stampMissingPackages();
-    if (!_hasFilter) return _logs;
-    return [
-      for (final e in _logs)
-        if (e.matches(_filter, _levelFilter)) e,
-    ];
+  Future<void> _clearLogcat() async {
+    final serial = _serial;
+    if (serial != null) {
+      try {
+        await widget.state.adb.clearLogcatBuffer(serial);
+      } catch (_) {}
+    }
+    _pending.clear();
+    _logs.clear();
+    _logBufferBytes = 0;
+    _visibleLogs = const [];
+    _listNotifier.value = const [];
+    setState(() {});
   }
 
-  Future<void> _execute() async {
-    final cmd = _commandController.text.trim();
-    if (cmd.isEmpty) return;
-    _history.insert(0, cmd);
-    _historyIndex = -1;
-    final output = await widget.state.adb.runCommand(_serial, cmd);
-    if (!mounted) return;
-    setState(() {
-      _logs.add(
-        LogEntry(
-          timestamp: _nowStamp(),
-          pid: '0000',
-          tid: '0000',
-          level: LogLevel.info,
-          tag: 'adb',
-          message: '>> adb $cmd\n$output',
-        ),
-      );
-    });
-  }
-
-  String _nowStamp() {
-    final n = DateTime.now();
-    String two(int v) => v.toString().padLeft(2, '0');
-    return '${two(n.month)}-${two(n.day)} ${two(n.hour)}:${two(n.minute)}:${two(n.second)}.${n.millisecond.toString().padLeft(3, '0')}';
+  void _togglePause() {
+    final pausing = !_paused;
+    setState(() => _paused = pausing);
+    if (pausing) {
+      _flushTimer?.cancel();
+      _flushTimer = null;
+      _pending.clear();
+      return;
+    }
+    _scheduleBatchFlush();
   }
 
   @override
@@ -254,13 +352,12 @@ class _TerminalPageState extends State<TerminalPage> {
     if (_serial == null) {
       return EmptyStateView(
         title: '未选择设备',
-        message: widget.state.lastError ?? '请先连接设备后再查看 logcat / 执行命令。',
+        message: widget.state.lastError ?? '请先连接设备后再查看 Logcat。',
         actionLabel: '刷新设备',
         onAction: widget.state.refreshDevices,
       );
     }
 
-    final logs = _visible;
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
       child: Column(
@@ -269,79 +366,64 @@ class _TerminalPageState extends State<TerminalPage> {
             child: Row(
               children: [
                 Expanded(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 448),
-                    child: TextField(
-                      controller: _filterController,
-                      onChanged: (v) => setState(() => _filter = v),
-                      style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
-                      decoration: InputDecoration(
-                        hintText: '按包名、标签、PID 或内容筛选…',
-                        filled: true,
-                        fillColor: AppColors.surfaceMuted,
-                        prefixIcon: Icon(
-                          Icons.search,
-                          size: 16,
-                          color: AppColors.textSecondary,
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: BorderSide(color: AppColors.border),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: BorderSide(color: AppColors.border),
-                        ),
+                  child: TextField(
+                    controller: _filterController,
+                    onChanged: (value) {
+                      widget.state.setSearch(value);
+                      _applyFilter(value);
+                    },
+                    onSubmitted: (value) {
+                      _commitSearchHistory(value);
+                      _applyFilter(value, immediate: true);
+                    },
+                    style: TextStyle(fontSize: 13, color: AppColors.textPrimary),
+                    decoration: InputDecoration(
+                      hintText: '搜索 Tag / 消息 / PID / pkg:包名…',
+                      isDense: true,
+                      filled: true,
+                      fillColor: AppColors.surfaceMuted,
+                      prefixIcon: Icon(Icons.search, size: 16, color: AppColors.textSecondary),
+                      suffixIcon: _searchHistorySuffix(),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(color: AppColors.border),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(color: AppColors.border),
                       ),
                     ),
                   ),
                 ),
-                const SizedBox(width: 16),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  decoration: BoxDecoration(
-                    color: AppColors.surfaceMuted,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: AppColors.border),
-                  ),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<LogLevel?>(
-                      value: _levelFilter,
-                      dropdownColor: AppColors.surfaceElevated,
-                      style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
-                      items: const [
-                        DropdownMenuItem(value: null, child: Text('全部级别')),
-                        DropdownMenuItem(value: LogLevel.verbose, child: Text('详细')),
-                        DropdownMenuItem(value: LogLevel.debug, child: Text('调试')),
-                        DropdownMenuItem(value: LogLevel.info, child: Text('信息')),
-                        DropdownMenuItem(value: LogLevel.warning, child: Text('警告')),
-                        DropdownMenuItem(value: LogLevel.error, child: Text('错误')),
-                      ],
-                      onChanged: (v) => setState(() => _levelFilter = v),
-                    ),
-                  ),
+                const SizedBox(width: 8),
+                _toolbarIcon(
+                  tooltip: _paused ? '继续' : '暂停',
+                  icon: _paused ? Icons.play_arrow : Icons.pause,
+                  onPressed: _togglePause,
+                  active: _paused,
                 ),
-                const SizedBox(width: 16),
-                Container(width: 1, height: 28, color: AppColors.border),
-                const SizedBox(width: 16),
-                Row(
-                  children: [
-                    Switch(
-                      value: _autoScroll,
-                      onChanged: _setAutoScroll,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '自动滚动',
-                      style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
-                    ),
-                  ],
+                _toolbarIcon(
+                  tooltip: '重启 Logcat',
+                  icon: Icons.refresh,
+                  onPressed: _startLogcat,
                 ),
-                const SizedBox(width: 12),
-                ActionButton(
-                  label: '清空',
+                _toolbarIcon(
+                  tooltip: '清空（含设备缓冲区）',
                   icon: Icons.delete_outline,
-                  onPressed: () => setState(() => _logs.clear()),
+                  onPressed: _clearLogcat,
+                ),
+                Container(
+                  width: 1,
+                  height: 24,
+                  margin: const EdgeInsets.symmetric(horizontal: 8),
+                  color: AppColors.border,
+                ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Switch(value: _autoScroll, onChanged: _paused ? null : _setAutoScroll),
+                    Text('贴底', style: TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+                  ],
                 ),
               ],
             ),
@@ -367,7 +449,7 @@ class _TerminalPageState extends State<TerminalPage> {
                         Icon(Icons.terminal, size: 14, color: AppColors.textSecondary),
                         const SizedBox(width: 8),
                         Text(
-                          'ADB 日志',
+                          'Logcat',
                           style: TextStyle(
                             fontSize: 11,
                             letterSpacing: 0.55,
@@ -375,12 +457,33 @@ class _TerminalPageState extends State<TerminalPage> {
                             fontWeight: FontWeight.w500,
                           ),
                         ),
+                        if (_paused) ...[
+                          const SizedBox(width: 10),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: AppColors.warning.withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              '已暂停',
+                              style: TextStyle(fontSize: 10, color: AppColors.warning),
+                            ),
+                          ),
+                        ],
                         const Spacer(),
-                        _dot(const Color(0x80FFB4AB)),
-                        const SizedBox(width: 6),
-                        _dot(const Color(0x80CEC2DB)),
-                        const SizedBox(width: 6),
-                        _dot(const Color(0x808ECDFF)),
+                        ValueListenableBuilder<List<LogEntry>>(
+                          valueListenable: _listNotifier,
+                          builder: (context, logs, _) {
+                            final label = _hasDisplayFilter
+                                ? '${logs.length} 条匹配 · 缓冲 $_bufferLimitLabel'
+                                : '${logs.length} 行 · 缓冲 $_bufferLimitLabel';
+                            return Text(
+                              label,
+                              style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                            );
+                          },
+                        ),
                       ],
                     ),
                   ),
@@ -393,144 +496,117 @@ class _TerminalPageState extends State<TerminalPage> {
                             actionLabel: '重试',
                             onAction: _startLogcat,
                           )
-                        : logs.isEmpty
-                            ? Center(
-                                child: Text(
-                                  '等待 logcat 输出…',
-                                  style: TextStyle(color: AppColors.textSecondary),
-                                ),
-                              )
-                            : ListView.builder(
+                        : ValueListenableBuilder<List<LogEntry>>(
+                            valueListenable: _listNotifier,
+                            builder: (context, logs, _) {
+                              if (logs.isEmpty) {
+                                final message = _paused
+                                    ? '已暂停接收日志'
+                                    : _hasDisplayFilter && _logs.isNotEmpty
+                                        ? '无匹配日志'
+                                        : '等待 logcat 输出…';
+                                return Center(
+                                  child: Text(
+                                    message,
+                                    style: TextStyle(color: AppColors.textSecondary),
+                                  ),
+                                );
+                              }
+                              return Scrollbar(
                                 controller: _scrollController,
-                                reverse: true,
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                                itemCount: logs.length,
-                                itemBuilder: (context, index) {
-                                  // reverse:true → index 0 在底部，对应最新日志。
-                                  final entry = logs[logs.length - 1 - index];
-                                  final isError = entry.level == LogLevel.error;
-                                  final pkg = entry.packageName;
-                                  return Container(
-                                    margin: const EdgeInsets.only(bottom: 12),
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: isError
-                                          ? AppColors.danger.withValues(alpha: 0.25)
-                                          : Colors.transparent,
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: SelectableText.rich(
-                                      TextSpan(
-                                        style: TextStyle(
-                                          fontFamily: 'Consolas',
-                                          fontSize: _fontSize,
-                                          height: 1.6,
-                                          color: entry.color,
-                                        ),
-                                        children: [
-                                          TextSpan(
-                                            text: '${entry.timestamp}  ',
-                                            style: TextStyle(
-                                              color: entry.color.withValues(alpha: 0.5),
-                                            ),
-                                          ),
-                                          TextSpan(
-                                            text:
-                                                '${entry.pid.padLeft(4)}  ${entry.tid.padLeft(4)}  ',
-                                            style: TextStyle(
-                                              color: entry.color.withValues(alpha: 0.5),
-                                            ),
-                                          ),
-                                          TextSpan(
-                                            text: '${entry.levelCode}  ',
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.w700,
-                                              color: entry.color,
-                                            ),
-                                          ),
-                                          if (pkg != null && pkg.isNotEmpty)
-                                            TextSpan(
-                                              text: '$pkg  ',
-                                              style: TextStyle(
-                                                color: entry.color.withValues(alpha: 0.65),
-                                              ),
-                                            ),
-                                          TextSpan(text: '${entry.tag}: '),
-                                          TextSpan(text: entry.message),
-                                        ],
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
+                                thumbVisibility: true,
+                                trackVisibility: true,
+                                child: ListView.builder(
+                                  controller: _scrollController,
+                                  reverse: true,
+                                  addAutomaticKeepAlives: false,
+                                  addRepaintBoundaries: true,
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                  itemCount: logs.length,
+                                  itemBuilder: (context, index) {
+                                    final entry = logs[logs.length - 1 - index];
+                                    return _LogLine(
+                                      key: ValueKey('${entry.timestamp}-${entry.pid}-${entry.tag}-$index'),
+                                      entry: entry,
+                                      fontSize: _fontSize,
+                                    );
+                                  },
+                                ),
+                              );
+                            },
+                          ),
                   ),
                 ],
               ),
             ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Text(
-                '>> adb',
-                style: TextStyle(
-                  fontFamily: 'Consolas',
-                  fontSize: _fontSize + 1,
-                  color: AppColors.accentBright,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: TextField(
-                  controller: _commandController,
-                  style: TextStyle(
-                    fontFamily: 'Consolas',
-                    fontSize: _fontSize + 1,
-                    color: AppColors.textPrimary,
-                  ),
-                  onSubmitted: (_) => _execute(),
-                  decoration: InputDecoration(
-                    filled: true,
-                    fillColor: AppColors.surfaceMuted,
-                    suffixIcon: IconButton(
-                      tooltip: '历史命令',
-                      onPressed: () {
-                        if (_history.isEmpty) return;
-                        _historyIndex = (_historyIndex + 1) % _history.length;
-                        _commandController.text = _history[_historyIndex];
-                      },
-                      icon: Icon(Icons.history, size: 18, color: AppColors.textSecondary),
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: AppColors.border),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: AppColors.border),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              ActionButton(
-                label: '执行',
-                icon: Icons.play_arrow,
-                filled: true,
-                onPressed: _execute,
-              ),
-            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _dot(Color color) {
-    return Container(
-      width: 12,
-      height: 12,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+  Widget _toolbarIcon({
+    required String tooltip,
+    required IconData icon,
+    required VoidCallback onPressed,
+    bool active = false,
+  }) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      icon: Icon(
+        icon,
+        size: 20,
+        color: active ? AppColors.accentBright : AppColors.textSecondary,
+      ),
+    );
+  }
+}
+
+class _LogLine extends StatelessWidget {
+  const _LogLine({
+    super.key,
+    required this.entry,
+    required this.fontSize,
+  });
+
+  final LogEntry entry;
+  final double fontSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final isError = entry.level == LogLevel.error;
+    return GestureDetector(
+      onSecondaryTap: () => _copy(context),
+      onLongPress: () => _copy(context),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+        decoration: BoxDecoration(
+          color: isError ? AppColors.danger.withValues(alpha: 0.18) : Colors.transparent,
+          borderRadius: BorderRadius.circular(3),
+        ),
+        child: Text(
+          entry.fullLine,
+          style: TextStyle(
+            fontFamily: 'Consolas',
+            fontSize: fontSize,
+            height: 1.35,
+            color: entry.color,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _copy(BuildContext context) {
+    Clipboard.setData(ClipboardData(text: entry.fullLine));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('已复制日志行'),
+        behavior: SnackBarBehavior.floating,
+        duration: Duration(seconds: 1),
+      ),
     );
   }
 }

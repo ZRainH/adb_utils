@@ -115,10 +115,17 @@ class _SettingsPageState extends State<SettingsPage> {
         ]),
         _section('日志与数据库', [
           _dropdown<int>(
-            'Logcat 缓冲区',
-            s.logcatBufferSize,
-            const [(1000, '1000 条'), (3000, '3000 条'), (8000, '8000 条')],
-            (v) => _patch((s) => s.logcatBufferSize = v),
+            'Logcat 循环缓冲',
+            s.logcatCycleBufferKb,
+            const [
+              (0, '不限制'),
+              (512, '512 KB'),
+              (1024, '1024 KB'),
+              (2048, '2048 KB'),
+              (4096, '4096 KB'),
+              (8192, '8192 KB'),
+            ],
+            (v) => _patch((s) => s.logcatCycleBufferKb = v),
           ),
           _dropdown<String?>(
             '默认日志级别',

@@ -56,6 +56,8 @@ class AppState extends ChangeNotifier {
   bool adbAvailable = false;
   String? lastError;
   String searchQuery = '';
+  Timer? _logcatSearchHistoryTimer;
+  static const _logcatSearchHistoryDelay = Duration(milliseconds: 1500);
   String? dbPackageFilter;
   String? filesTargetPath;
   String? filesRunAsPackage;
@@ -76,7 +78,7 @@ class AppState extends ChangeNotifier {
   Timer? _pollTimer;
   bool _refreshingDevices = false;
 
-  static const appVersion = '1.0.4';
+  static const appVersion = '1.0.5';
   static const githubRepo = 'ZRainH/adb_utils';
 
   ThemeMode get themeMode => switch (settings.themePref) {
@@ -331,6 +333,9 @@ class AppState extends ChangeNotifier {
       }
       return;
     }
+    if (selectedNav == 4 && index != 4) {
+      _logcatSearchHistoryTimer?.cancel();
+    }
     selectedNav = index;
     if (index == 3) {
       dbPackageFilter = null;
@@ -340,6 +345,43 @@ class AppState extends ChangeNotifier {
 
   void setSearch(String value) {
     searchQuery = value;
+    if (selectedNav == 4) {
+      _scheduleLogcatSearchHistory(value);
+    }
+    notifyListeners();
+  }
+
+  /// Enter in search field — save logcat history immediately when on Logcat page.
+  void submitSearch(String value) {
+    searchQuery = value;
+    _logcatSearchHistoryTimer?.cancel();
+    if (selectedNav == 4) {
+      unawaited(rememberLogcatSearch(value));
+    } else {
+      notifyListeners();
+    }
+  }
+
+  void _scheduleLogcatSearchHistory(String value) {
+    _logcatSearchHistoryTimer?.cancel();
+    final q = value.trim();
+    if (q.isEmpty) return;
+    _logcatSearchHistoryTimer = Timer(_logcatSearchHistoryDelay, () {
+      if (selectedNav != 4) return;
+      if (searchQuery.trim() != q) return;
+      unawaited(rememberLogcatSearch(q));
+    });
+  }
+
+  Future<void> rememberLogcatSearch(String query) async {
+    settings.pushLogcatSearchHistory(query);
+    await persist();
+    notifyListeners();
+  }
+
+  Future<void> clearLogcatSearchHistory() async {
+    settings.clearLogcatSearchHistory();
+    await persist();
     notifyListeners();
   }
 

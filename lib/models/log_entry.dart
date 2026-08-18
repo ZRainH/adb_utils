@@ -16,6 +16,27 @@ enum LogLevel {
     }
     return null;
   }
+
+  /// Minimum level for filtering (matches Android Studio Logcat).
+  bool passesMinLevel(LogLevel? minLevel) {
+    if (minLevel == null) return true;
+    return index >= minLevel.index;
+  }
+
+  String get chipCode {
+    switch (this) {
+      case LogLevel.verbose:
+        return 'V';
+      case LogLevel.debug:
+        return 'D';
+      case LogLevel.info:
+        return 'I';
+      case LogLevel.warning:
+        return 'W';
+      case LogLevel.error:
+        return 'E';
+    }
+  }
 }
 
 class LogEntry {
@@ -79,8 +100,25 @@ class LogEntry {
     }
   }
 
-  bool matches(String query, LogLevel? filterLevel) {
-    if (filterLevel != null && level != filterLevel) return false;
+  String get fullLine {
+    final pkg = packageName;
+    final pkgPart = pkg != null && pkg.isNotEmpty ? ' ($pkg)' : '';
+    return '$timestamp $pid-$tid $levelCode/$tag:$pkgPart $message';
+  }
+
+  bool matches(
+    String query,
+    LogLevel? minLevel, {
+    String? packageFilter,
+  }) {
+    if (!level.passesMinLevel(minLevel)) return false;
+
+    if (packageFilter != null && packageFilter.isNotEmpty) {
+      final want = packageFilter.toLowerCase();
+      final pkg = packageName?.toLowerCase() ?? '';
+      if (pkg != want) return false;
+    }
+
     if (query.isEmpty) return true;
     final q = query.toLowerCase().trim();
     if (q.isEmpty) return true;
@@ -98,10 +136,36 @@ class LogEntry {
     }
 
     final pkg = packageName?.toLowerCase() ?? '';
-    return tag.toLowerCase().contains(q) ||
-        message.toLowerCase().contains(q) ||
+    return tag.contains(q) ||
+        message.contains(q) ||
         pid.contains(q) ||
         tid.contains(q) ||
         pkg.contains(q);
+  }
+
+  /// Faster path when [queryLower] is already lowercased.
+  bool matchesFast(String queryLower, LogLevel? minLevel) {
+    if (!level.passesMinLevel(minLevel)) return false;
+    if (queryLower.isEmpty) return true;
+
+    final pkgQuery = queryLower.startsWith('pkg:')
+        ? queryLower.substring(4).trim()
+        : queryLower.startsWith('package:')
+            ? queryLower.substring(8).trim()
+            : null;
+
+    if (pkgQuery != null && pkgQuery.isNotEmpty) {
+      final pkg = packageName?.toLowerCase() ?? '';
+      return pkg.contains(pkgQuery);
+    }
+
+    final pkg = packageName?.toLowerCase() ?? '';
+    final tagLower = tag.toLowerCase();
+    final msgLower = message.toLowerCase();
+    return tagLower.contains(queryLower) ||
+        msgLower.contains(queryLower) ||
+        pid.contains(queryLower) ||
+        tid.contains(queryLower) ||
+        pkg.contains(queryLower);
   }
 }
