@@ -1,7 +1,7 @@
 name: adb_utils
 description: "ADB 桌面工具 — 管理设备、应用、文件与日志"
 publish_to: 'none'
-version: 1.0.3+4
+version: 1.0.4+5
 
 environment:
   sdk: ^3.12.2

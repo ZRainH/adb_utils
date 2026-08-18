@@ -7,6 +7,7 @@ import '../services/app_state.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common_widgets.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/file_preview_dialog.dart';
 
 class FileExplorerPage extends StatefulWidget {
   const FileExplorerPage({super.key, required this.state});
@@ -154,6 +155,28 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
     _applyTargetPath(entry.path, _runAsPackage);
   }
 
+  void _onFileActivated(FileEntry entry) {
+    if (entry.isDirectory) {
+      _openFolder(entry);
+      return;
+    }
+    if (entry.isPreviewable) {
+      showFilePreviewDialog(
+        context,
+        state: widget.state,
+        entry: entry,
+        runAsPackage: _effectiveRunAs,
+      );
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('「${entry.name}」暂不支持预览，请下载后查看'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
   Future<void> _load() async {
     final serial = _serial;
     if (serial == null) {
@@ -255,6 +278,10 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
         return Icons.android;
       case FileKind.text:
         return Icons.description_outlined;
+      case FileKind.log:
+        return Icons.receipt_long_outlined;
+      case FileKind.json:
+        return Icons.data_object_outlined;
       case FileKind.other:
         return Icons.insert_drive_file_outlined;
     }
@@ -555,7 +582,7 @@ class _FileExplorerPageState extends State<FileExplorerPage> {
                                               }
                                             });
                                           },
-                                          onDoubleTap: () => _openFolder(file),
+                                          onDoubleTap: () => _onFileActivated(file),
                                           child: Container(
                                             padding: const EdgeInsets.symmetric(
                                               horizontal: 24,

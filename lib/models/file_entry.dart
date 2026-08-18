@@ -1,4 +1,4 @@
-enum FileKind { folder, image, apk, text, other }
+enum FileKind { folder, image, apk, text, log, json, other }
 
 class FileEntry {
   const FileEntry({
@@ -7,6 +7,7 @@ class FileEntry {
     required this.sizeLabel,
     required this.modified,
     required this.path,
+    this.sizeBytes = 0,
   });
 
   final String name;
@@ -14,6 +15,13 @@ class FileEntry {
   final String sizeLabel;
   final String modified;
   final String path;
+  final int sizeBytes;
 
   bool get isDirectory => kind == FileKind.folder;
+
+  bool get isPreviewable =>
+      kind == FileKind.text ||
+      kind == FileKind.image ||
+      kind == FileKind.log ||
+      kind == FileKind.json;
 }

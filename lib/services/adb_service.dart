@@ -1049,6 +1049,7 @@ class AdbService {
           sizeLabel: isDir ? '--' : _formatBytes(sizeBytes),
           modified: modified,
           path: normalized.endsWith('/') ? '$normalized$name' : '$normalized/$name',
+          sizeBytes: isDir ? 0 : sizeBytes,
         ),
       );
     }
@@ -1086,6 +1087,222 @@ class AdbService {
     } catch (e) {
       return e.toString();
     }
+  }
+
+  static const int previewTextMaxBytes = 512 * 1024;
+  static const int previewJsonMaxBytes = 1024 * 1024;
+  static const int previewLogMaxBytes = 2 * 1024 * 1024;
+  static const int previewImageMaxBytes = 8 * 1024 * 1024;
+
+  int _previewMaxBytes(FileKind kind) {
+    return switch (kind) {
+      FileKind.image => previewImageMaxBytes,
+      FileKind.log => previewLogMaxBytes,
+      FileKind.json => previewJsonMaxBytes,
+      _ => previewTextMaxBytes,
+    };
+  }
+
+  /// Reads remote file bytes for in-app preview (text/log/image).
+  Future<FilePreviewData> readFilePreview(
+    String serial,
+    FileEntry entry, {
+    String? runAsPackage,
+  }) async {
+    final path = _normalizeRemotePath(entry.path);
+    final pkg = runAsPackage ??
+        _packageFromDataPath(path) ??
+        _packageFromAndroidDataPath(path);
+
+    final maxBytes = _previewMaxBytes(entry.kind);
+
+    if (!entry.isDirectory &&
+        entry.sizeBytes > 0 &&
+        entry.kind != FileKind.log &&
+        entry.sizeBytes > maxBytes) {
+      return FilePreviewData.tooLarge(
+        entry.kind,
+        maxBytes: maxBytes,
+        actualBytes: entry.sizeBytes,
+      );
+    }
+
+    if (!entry.isPreviewable) {
+      return const FilePreviewData.unsupported();
+    }
+
+    final useTail = entry.kind == FileKind.log &&
+        entry.sizeBytes > maxBytes;
+
+    Uint8List? bytes;
+    if (pkg != null && path.startsWith('/data/data/$pkg')) {
+      final rel = path == '/data/data/$pkg'
+          ? entry.name
+          : path.substring('/data/data/$pkg/'.length);
+      bytes = await _readPrivateFileBytes(
+        serial,
+        pkg,
+        rel,
+        maxBytes: maxBytes,
+        tail: useTail,
+      );
+    } else {
+      bytes = await _readPublicFileBytes(
+        serial,
+        path,
+        maxBytes: maxBytes,
+        tail: useTail,
+      );
+    }
+
+    if (bytes == null || bytes.isEmpty) {
+      return const FilePreviewData.error('无法读取文件（权限不足或路径无效）');
+    }
+
+    final truncated = entry.kind == FileKind.log
+        ? (entry.sizeBytes > bytes.length || bytes.length >= maxBytes)
+        : (entry.sizeBytes > 0
+            ? entry.sizeBytes > bytes.length
+            : bytes.length >= maxBytes);
+
+    if (entry.kind == FileKind.image) {
+      return FilePreviewData.image(bytes, truncated: truncated);
+    }
+
+    if (entry.kind != FileKind.log && entry.kind != FileKind.json && _looksBinary(bytes)) {
+      return const FilePreviewData.error('文件似乎是二进制内容，请下载后查看');
+    }
+
+    var text = utf8.decode(bytes, allowMalformed: true);
+    if (entry.kind == FileKind.json) {
+      text = _formatJsonPreview(text);
+    }
+    return FilePreviewData.text(
+      text,
+      truncated: truncated,
+      fromTail: useTail,
+    );
+  }
+
+  String _formatJsonPreview(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return raw;
+    try {
+      final decoded = jsonDecode(trimmed);
+      return const JsonEncoder.withIndent('  ').convert(decoded);
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  Future<Uint8List?> _readPublicFileBytes(
+    String serial,
+    String path, {
+    required int maxBytes,
+    required bool tail,
+  }) async {
+    if (tail) {
+      final tailed = await _execOutBytes(
+        serial,
+        ['tail', '-c', '$maxBytes', path],
+        maxBytes: maxBytes + 4096,
+      );
+      if (tailed != null && tailed.isNotEmpty) return tailed;
+    }
+
+    final bytes = await _execOutBytes(serial, ['cat', path], maxBytes: maxBytes);
+    if (bytes != null && bytes.isNotEmpty) return bytes;
+
+    return _pullRemoteFileBytes(
+      serial,
+      path,
+      maxBytes: maxBytes,
+      tail: tail,
+    );
+  }
+
+  Future<Uint8List?> _readPrivateFileBytes(
+    String serial,
+    String pkg,
+    String relPath, {
+    required int maxBytes,
+    required bool tail,
+  }) async {
+    if (tail) {
+      final tailed = await _execOutBytes(
+        serial,
+        ['run-as', pkg, 'tail', '-c', '$maxBytes', relPath],
+        maxBytes: maxBytes + 4096,
+      );
+      if (tailed != null && tailed.isNotEmpty) return tailed;
+
+      final cmd =
+          'run-as ${shellQuote(pkg)} tail -c $maxBytes ${shellQuote(relPath)}';
+      final viaSh = await _execOutBytes(
+        serial,
+        ['sh', '-c', cmd],
+        maxBytes: maxBytes + 4096,
+      );
+      if (viaSh != null && viaSh.isNotEmpty) return viaSh;
+    }
+
+    final direct = await _execOutBytes(
+      serial,
+      ['run-as', pkg, 'cat', relPath],
+      maxBytes: maxBytes,
+    );
+    if (direct != null && direct.isNotEmpty) return direct;
+
+    final cmd = 'run-as ${shellQuote(pkg)} cat ${shellQuote(relPath)}';
+    return _execOutBytes(
+      serial,
+      ['sh', '-c', cmd],
+      maxBytes: maxBytes,
+    );
+  }
+
+  Future<Uint8List?> _pullRemoteFileBytes(
+    String serial,
+    String remotePath, {
+    required int maxBytes,
+    bool tail = false,
+  }) async {
+    final tag = '${DateTime.now().microsecondsSinceEpoch}_pull';
+    final local = File(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}adb_utils_$tag.bin',
+    );
+    try {
+      final pull = await _run(
+        ['pull', remotePath, local.path],
+        serial: serial,
+        timeout: const Duration(minutes: 2),
+      );
+      if (pull.exitCode != 0 || !local.existsSync()) return null;
+      var bytes = local.readAsBytesSync();
+      if (bytes.isEmpty) return null;
+      if (tail && bytes.length > maxBytes) {
+        bytes = bytes.sublist(bytes.length - maxBytes);
+      } else if (bytes.length > maxBytes) {
+        return null;
+      }
+      return Uint8List.fromList(bytes);
+    } catch (_) {
+      return null;
+    } finally {
+      try {
+        if (local.existsSync()) local.deleteSync();
+      } catch (_) {}
+    }
+  }
+
+  bool _looksBinary(Uint8List bytes) {
+    final sample = bytes.length > 4096 ? bytes.sublist(0, 4096) : bytes;
+    var nonText = 0;
+    for (final b in sample) {
+      if (b == 0) return true;
+      if (b < 9 || (b > 13 && b < 32)) nonText++;
+    }
+    return nonText > sample.length * 0.1;
   }
 
   Future<String?> pullFile(String serial, String remotePath, String localPath) async {
@@ -1387,11 +1604,45 @@ class AdbService {
         lower.endsWith('.gif')) {
       return FileKind.image;
     }
+    if (lower.endsWith('.log') ||
+        lower.endsWith('.logcat') ||
+        lower.endsWith('.trace') ||
+        lower.endsWith('.tombstone') ||
+        lower.endsWith('.crash') ||
+        lower.endsWith('.out') ||
+        lower.contains('logcat') ||
+        lower.startsWith('log_') ||
+        lower.endsWith('_log')) {
+      return FileKind.log;
+    }
+    if (lower.endsWith('.json') ||
+        lower.endsWith('.geojson') ||
+        lower.endsWith('.jsonc')) {
+      return FileKind.json;
+    }
     if (lower.endsWith('.txt') ||
-        lower.endsWith('.log') ||
-        lower.endsWith('.json') ||
         lower.endsWith('.xml') ||
-        lower.endsWith('.csv')) {
+        lower.endsWith('.csv') ||
+        lower.endsWith('.md') ||
+        lower.endsWith('.yaml') ||
+        lower.endsWith('.yml') ||
+        lower.endsWith('.properties') ||
+        lower.endsWith('.conf') ||
+        lower.endsWith('.cfg') ||
+        lower.endsWith('.ini') ||
+        lower.endsWith('.html') ||
+        lower.endsWith('.htm') ||
+        lower.endsWith('.css') ||
+        lower.endsWith('.js') ||
+        lower.endsWith('.ts') ||
+        lower.endsWith('.sh') ||
+        lower.endsWith('.gradle') ||
+        lower.endsWith('.kt') ||
+        lower.endsWith('.java') ||
+        lower.endsWith('.dart') ||
+        lower.endsWith('.pro') ||
+        lower.endsWith('.gitignore') ||
+        lower.endsWith('.env')) {
       return FileKind.text;
     }
     return FileKind.other;
@@ -1438,6 +1689,71 @@ class AdbService {
     if (buffer.isNotEmpty) result.add(buffer.toString());
     return result;
   }
+}
+
+enum FilePreviewKind { text, image, unsupported, tooLarge, error }
+
+class FilePreviewData {
+  const FilePreviewData._({
+    required this.kind,
+    this.text,
+    this.bytes,
+    this.truncated = false,
+    this.fromTail = false,
+    this.error,
+    this.maxBytes,
+    this.actualBytes,
+  });
+
+  const FilePreviewData.text(
+    String content, {
+    bool truncated = false,
+    bool fromTail = false,
+  }) : this._(
+          kind: FilePreviewKind.text,
+          text: content,
+          truncated: truncated,
+          fromTail: fromTail,
+        );
+
+  const FilePreviewData.image(Uint8List data, {bool truncated = false})
+      : this._(
+          kind: FilePreviewKind.image,
+          bytes: data,
+          truncated: truncated,
+        );
+
+  const FilePreviewData.unsupported()
+      : this._(kind: FilePreviewKind.unsupported);
+
+  const FilePreviewData.error(String message)
+      : this._(kind: FilePreviewKind.error, error: message);
+
+  FilePreviewData.tooLarge(
+    FileKind fileKind, {
+    required int maxBytes,
+    required int actualBytes,
+  }) : this._(
+          kind: FilePreviewKind.tooLarge,
+          maxBytes: maxBytes,
+          actualBytes: actualBytes,
+          error: fileKind == FileKind.image
+              ? '图片过大'
+              : fileKind == FileKind.log
+                  ? '日志过大'
+                  : fileKind == FileKind.json
+                      ? 'JSON 过大'
+                      : '文件过大',
+        );
+
+  final FilePreviewKind kind;
+  final String? text;
+  final Uint8List? bytes;
+  final bool truncated;
+  final bool fromTail;
+  final String? error;
+  final int? maxBytes;
+  final int? actualBytes;
 }
 
 class DeviceFlags {
