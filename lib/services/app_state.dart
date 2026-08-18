@@ -78,7 +78,7 @@ class AppState extends ChangeNotifier {
   Timer? _pollTimer;
   bool _refreshingDevices = false;
 
-  static const appVersion = '1.0.5';
+  static const appVersion = '1.0.6';
   static const githubRepo = 'ZRainH/adb_utils';
 
   ThemeMode get themeMode => switch (settings.themePref) {

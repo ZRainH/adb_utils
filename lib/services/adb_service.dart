@@ -1414,10 +1414,17 @@ class AdbService {
   }
 
   Future<String> runCommand(String? serial, String command) async {
-    final parts = _splitCommand(command.trim());
-    if (parts.isEmpty) return '';
+    final args = _parseHandbookCommand(command, serial);
+    if (args.adbArgs.isEmpty) return '';
+    if (args.needsDevice && args.deviceSerial == null) {
+      return '错误：请先选择设备';
+    }
     try {
-      final result = await _run(parts, serial: serial, timeout: const Duration(minutes: 2));
+      final result = await _run(
+        args.adbArgs,
+        serial: args.deviceSerial,
+        timeout: const Duration(minutes: 2),
+      );
       final out = result.stdout.toString();
       final err = result.stderr.toString();
       if (out.isNotEmpty && err.isNotEmpty) return '$out\n$err';
@@ -1427,6 +1434,75 @@ class AdbService {
     } catch (e) {
       return '错误：$e';
     }
+  }
+
+  bool handbookCommandNeedsDevice(String command) =>
+      _parseHandbookCommand(command, null).needsDevice;
+
+  _HandbookCommandArgs _parseHandbookCommand(String command, String? defaultSerial) {
+    var trimmed = command.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (trimmed.toLowerCase().startsWith('adb ')) {
+      trimmed = trimmed.substring(4).trim();
+    }
+    final parts = _splitCommand(trimmed);
+    if (parts.isEmpty) {
+      return const _HandbookCommandArgs(adbArgs: [], needsDevice: false);
+    }
+
+    final hasInlineSelector = parts[0] == '-s' ||
+        parts[0] == '-d' ||
+        parts[0] == '-e' ||
+        parts[0] == '-t';
+    final needsDevice = _handbookNeedsDevice(parts);
+
+    if (hasInlineSelector) {
+      return _HandbookCommandArgs(
+        adbArgs: parts,
+        needsDevice: needsDevice,
+      );
+    }
+
+    return _HandbookCommandArgs(
+      adbArgs: parts,
+      deviceSerial: needsDevice ? defaultSerial : null,
+      needsDevice: needsDevice,
+    );
+  }
+
+  bool _handbookNeedsDevice(List<String> parts) {
+    var i = 0;
+    while (i < parts.length) {
+      final token = parts[i];
+      if (token == '-s' && i + 1 < parts.length) {
+        i += 2;
+        continue;
+      }
+      if (token == '-t' && i + 1 < parts.length) {
+        i += 2;
+        continue;
+      }
+      if (token == '-d' || token == '-e') {
+        i += 1;
+        continue;
+      }
+      break;
+    }
+    if (i >= parts.length) return false;
+
+    final head = parts[i].toLowerCase();
+    if (head == 'mdns') return false;
+    const hostOnly = {
+      'version',
+      'help',
+      'start-server',
+      'kill-server',
+      'devices',
+      'connect',
+      'disconnect',
+      'pair',
+      'wait-for-device',
+    };
+    return !hostOnly.contains(head);
   }
 
   Stream<LogEntry> startLogcat(
@@ -1733,6 +1809,18 @@ class AdbService {
     if (buffer.isNotEmpty) result.add(buffer.toString());
     return result;
   }
+}
+
+class _HandbookCommandArgs {
+  const _HandbookCommandArgs({
+    required this.adbArgs,
+    this.deviceSerial,
+    this.needsDevice = false,
+  });
+
+  final List<String> adbArgs;
+  final String? deviceSerial;
+  final bool needsDevice;
 }
 
 enum FilePreviewKind { text, image, unsupported, tooLarge, error }

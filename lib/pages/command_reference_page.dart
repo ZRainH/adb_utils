@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../data/adb_command_catalog.dart';
 import '../services/app_state.dart';
 import '../theme/app_colors.dart';
+import '../widgets/command_run_dialog.dart';
 
 class CommandReferencePage extends StatefulWidget {
   const CommandReferencePage({super.key, this.state});
@@ -16,7 +17,12 @@ class CommandReferencePage extends StatefulWidget {
 
 class _CommandReferencePageState extends State<CommandReferencePage> {
   late final List<AdbCommandSection> _sections = buildAdbCommandCatalog();
+  final _commandController = TextEditingController();
+  final _commandFocusNode = FocusNode();
+  final _transcriptScrollController = ScrollController();
   String _localQuery = '';
+  String _transcript = '';
+  bool _running = false;
 
   @override
   void initState() {
@@ -27,6 +33,9 @@ class _CommandReferencePageState extends State<CommandReferencePage> {
   @override
   void dispose() {
     widget.state?.removeListener(_onState);
+    _commandController.dispose();
+    _commandFocusNode.dispose();
+    _transcriptScrollController.dispose();
     super.dispose();
   }
 
@@ -63,6 +72,34 @@ class _CommandReferencePageState extends State<CommandReferencePage> {
   int get _commandCount =>
       _filtered.fold<int>(0, (sum, s) => sum + s.items.length);
 
+  void _loadCommand(String command) {
+    final serial = widget.state?.selectedDevice?.id;
+    _commandController.text =
+        prepareHandbookCommand(command, deviceSerial: serial);
+    _commandFocusNode.requestFocus();
+    setState(() {});
+  }
+
+  void _scrollTranscriptToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_transcriptScrollController.hasClients) return;
+      _transcriptScrollController.animateTo(
+        _transcriptScrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  void _appendTranscript(String command, String output) {
+    final buf = StringBuffer(_transcript);
+    if (_transcript.isNotEmpty) buf.writeln();
+    buf.writeln('> $command');
+    buf.write(output);
+    if (output.isNotEmpty && !output.endsWith('\n')) buf.writeln();
+    _transcript = buf.toString();
+  }
+
   Future<void> _copy(String command) async {
     final text = command.replaceAll('\n', ' ').trim();
     await Clipboard.setData(ClipboardData(text: text));
@@ -72,192 +109,345 @@ class _CommandReferencePageState extends State<CommandReferencePage> {
     );
   }
 
+  Future<void> _executeCommand() async {
+    final state = widget.state;
+    if (state == null || _running) return;
+
+    final command = _commandController.text.trim();
+    final validationError = validateHandbookCommand(state, command);
+    if (validationError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(validationError)),
+      );
+      return;
+    }
+
+    final ok = await confirmDangerousHandbookCommand(context, state, command);
+    if (!ok || !mounted) return;
+
+    setState(() => _running = true);
+    _scrollTranscriptToBottom();
+
+    final output = await state.adb.runCommand(state.selectedDevice?.id, command);
+
+    if (!mounted) return;
+    setState(() {
+      _running = false;
+      _appendTranscript(command, output);
+    });
+    _scrollTranscriptToBottom();
+  }
+
+  void _clearTerminal() {
+    _commandController.clear();
+    setState(() => _transcript = '');
+  }
+
+  Future<void> _copyTranscript() async {
+    if (_transcript.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: _transcript));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('终端内容已复制')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final sections = _filtered;
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 1280),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _Header(
-              query: _localQuery,
-              totalCommands: _sections.fold<int>(0, (s, e) => s + e.items.length),
-              visibleCommands: _commandCount,
-              onQueryChanged: (v) => setState(() => _localQuery = v),
-            ),
-            const SizedBox(height: 24),
-            if (sections.isEmpty)
-              Padding(
-                padding: EdgeInsets.symmetric(vertical: 48),
-                child: Center(
-                  child: Text(
-                    '未找到匹配的命令',
-                    style: TextStyle(color: AppColors.textSecondary),
+    final fontSize = widget.state?.settings.terminalFontSize ?? 13;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _PageHeader(
+            totalCommands:
+                _sections.fold<int>(0, (s, e) => s + e.items.length),
+            visibleCommands: _commandCount,
+          ),
+          const SizedBox(height: 12),
+          _SearchBar(onQueryChanged: (v) => setState(() => _localQuery = v)),
+          const SizedBox(height: 16),
+          Expanded(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: sections.isEmpty
+                      ? Center(
+                          child: Text(
+                            '未找到匹配的命令',
+                            style: TextStyle(color: AppColors.textSecondary),
+                          ),
+                        )
+                      : Scrollbar(
+                          thumbVisibility: true,
+                          child: ListView(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            children: [
+                              for (var i = 0; i < sections.length; i++) ...[
+                                if (i > 0) const SizedBox(height: 16),
+                                _SectionCard(
+                                  section: sections[i],
+                                  onLoad: _loadCommand,
+                                  onCopy: _copy,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: _CmdTerminalPanel(
+                    state: widget.state,
+                    fontSize: fontSize,
+                    commandController: _commandController,
+                    commandFocusNode: _commandFocusNode,
+                    transcript: _transcript,
+                    running: _running,
+                    scrollController: _transcriptScrollController,
+                    onRun: _executeCommand,
+                    onClear: _clearTerminal,
+                    onCopy: _copyTranscript,
                   ),
                 ),
-              )
-            else
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final wide = constraints.maxWidth >= 900;
-                  if (!wide) {
-                    return Column(
-                      children: [
-                        for (var i = 0; i < sections.length; i++) ...[
-                          if (i > 0) const SizedBox(height: 16),
-                          _SectionCard(section: sections[i], onCopy: _copy),
-                        ],
-                      ],
-                    );
-                  }
-                  final left = <AdbCommandSection>[];
-                  final right = <AdbCommandSection>[];
-                  for (var i = 0; i < sections.length; i++) {
-                    if (i.isEven) {
-                      left.add(sections[i]);
-                    } else {
-                      right.add(sections[i]);
-                    }
-                  }
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(child: _ColumnList(sections: left, onCopy: _copy)),
-                      const SizedBox(width: 16),
-                      Expanded(child: _ColumnList(sections: right, onCopy: _copy)),
-                    ],
-                  );
-                },
-              ),
-            const SizedBox(height: 32),
-            Text(
-              '注意：执行命令前请确认目标设备已授权 USB 调试。'
-              'root / remount / verity / 备份恢复等操作可能影响系统稳定性，请谨慎使用。'
-              '部分命令依赖 Android 版本与 ROM 能力。',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 11,
-                height: 1.45,
-                letterSpacing: 0.5,
-                color: AppColors.textSecondary,
-              ),
+              ],
             ),
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PageHeader extends StatelessWidget {
+  const _PageHeader({
+    required this.totalCommands,
+    required this.visibleCommands,
+  });
+
+  final int totalCommands;
+  final int visibleCommands;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'ADB 指令手册',
+          style: TextStyle(
+            fontSize: 24,
+            height: 1.25,
+            letterSpacing: -0.5,
+            color: AppColors.textPrimary,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '共 $totalCommands 条'
+          '${visibleCommands == totalCommands ? '' : ' · 显示 $visibleCommands 条'}'
+          ' · 点击左侧命令填入终端',
+          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+        ),
+      ],
+    );
+  }
+}
+
+class _SearchBar extends StatelessWidget {
+  const _SearchBar({required this.onQueryChanged});
+
+  final ValueChanged<String> onQueryChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      onChanged: onQueryChanged,
+      style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
+      decoration: InputDecoration(
+        hintText: "筛选命令（如 'logcat'、'pm'、'install'）…",
+        isDense: true,
+        filled: true,
+        fillColor: AppColors.surfaceElevated,
+        prefixIcon: Icon(Icons.search, size: 18, color: AppColors.textSecondary),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: AppColors.border),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: AppColors.border),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: AppColors.accentBright),
         ),
       ),
     );
   }
 }
 
-class _ColumnList extends StatelessWidget {
-  const _ColumnList({required this.sections, required this.onCopy});
-
-  final List<AdbCommandSection> sections;
-  final ValueChanged<String> onCopy;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        for (var i = 0; i < sections.length; i++) ...[
-          if (i > 0) const SizedBox(height: 16),
-          _SectionCard(section: sections[i], onCopy: onCopy),
-        ],
-      ],
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header({
-    required this.query,
-    required this.totalCommands,
-    required this.visibleCommands,
-    required this.onQueryChanged,
+class _CmdTerminalPanel extends StatelessWidget {
+  const _CmdTerminalPanel({
+    required this.state,
+    required this.fontSize,
+    required this.commandController,
+    required this.commandFocusNode,
+    required this.transcript,
+    required this.running,
+    required this.scrollController,
+    required this.onRun,
+    required this.onClear,
+    required this.onCopy,
   });
 
-  final String query;
-  final int totalCommands;
-  final int visibleCommands;
-  final ValueChanged<String> onQueryChanged;
+  static const _cmdBg = Color(0xFF0C0C0C);
+  static const _cmdText = Color(0xFFCCCCCC);
+  static const _cmdPrompt = Color(0xFFE5E5E5);
+
+  final AppState? state;
+  final double fontSize;
+  final TextEditingController commandController;
+  final FocusNode commandFocusNode;
+  final String transcript;
+  final bool running;
+  final ScrollController scrollController;
+  final VoidCallback onRun;
+  final VoidCallback onClear;
+  final VoidCallback onCopy;
 
   @override
   Widget build(BuildContext context) {
+    final device = state?.selectedDevice;
+    final title = device == null
+        ? 'ADB 终端 · 未选择设备'
+        : 'ADB 终端 · ${device.name}';
+
     return Container(
-      padding: const EdgeInsets.only(bottom: 24),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: AppColors.border)),
+        color: _cmdBg,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.border),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          Container(
+            height: 32,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A1A1A),
+              border: Border(bottom: BorderSide(color: AppColors.border.withValues(alpha: 0.6))),
+            ),
+            child: Row(
               children: [
-                Text(
-                  'ADB 指令手册',
-                  style: TextStyle(
-                    fontSize: 32,
-                    height: 1.25,
-                    letterSpacing: -0.8,
-                    color: AppColors.textPrimary,
-                    fontWeight: FontWeight.w500,
+                Icon(Icons.terminal, size: 14, color: AppColors.textSecondary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  '共 $totalCommands 条常用命令'
-                  '${visibleCommands == totalCommands ? '' : ' · 当前显示 $visibleCommands 条'}',
-                  style: TextStyle(
-                    fontSize: 16,
-                    letterSpacing: 0.5,
-                    color: AppColors.textSecondary,
-                  ),
+                IconButton(
+                  tooltip: '复制',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  icon: Icon(Icons.copy_rounded, size: 14, color: AppColors.textSecondary),
+                  onPressed: transcript.isEmpty ? null : onCopy,
+                ),
+                IconButton(
+                  tooltip: '清屏',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  icon: Icon(Icons.delete_outline, size: 14, color: AppColors.textSecondary),
+                  onPressed: running ? null : onClear,
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 16),
-          SizedBox(
-            width: 360,
-            child: TextField(
-              onChanged: onQueryChanged,
-              style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
-              decoration: InputDecoration(
-                hintText: "筛选命令（如 'logcat'、'pm'、'input'）…",
-                hintStyle: const TextStyle(
-                  fontSize: 14,
-                  color: Color(0xFF6B7280),
-                  letterSpacing: 0.25,
-                ),
-                filled: true,
-                fillColor: AppColors.surfaceElevated,
-                prefixIcon: Icon(
-                  Icons.search,
-                  size: 18,
-                  color: AppColors.textSecondary,
-                ),
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 14,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(999),
-                  borderSide: BorderSide(color: AppColors.border),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(999),
-                  borderSide: BorderSide(color: AppColors.border),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(999),
-                  borderSide: BorderSide(color: AppColors.accentBright),
+          Expanded(
+            child: Scrollbar(
+              controller: scrollController,
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                controller: scrollController,
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+                child: SelectableText(
+                  transcript.isEmpty
+                      ? 'Microsoft Windows [Version 10.0.26200]\n(c) adb_utils. 保留所有权利。\n\n输入 adb 命令，或点击左侧手册命令填入。\n'
+                      : transcript,
+                  style: TextStyle(
+                    fontFamily: 'Consolas',
+                    fontSize: fontSize,
+                    height: 1.4,
+                    color: _cmdText,
+                  ),
                 ),
               ),
+            ),
+          ),
+          Container(
+            decoration: BoxDecoration(
+              color: _cmdBg,
+              border: Border(top: BorderSide(color: AppColors.border.withValues(alpha: 0.6))),
+            ),
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Text(
+                  'adb>',
+                  style: TextStyle(
+                    fontFamily: 'Consolas',
+                    fontSize: fontSize,
+                    color: _cmdPrompt,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: commandController,
+                    focusNode: commandFocusNode,
+                    enabled: !running,
+                    style: TextStyle(
+                      fontFamily: 'Consolas',
+                      fontSize: fontSize,
+                      color: _cmdText,
+                    ),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.zero,
+                      hintText: '',
+                    ),
+                    cursorColor: _cmdText,
+                    onSubmitted: running ? null : (_) => onRun(),
+                  ),
+                ),
+                if (running)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 8),
+                    child: SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: _cmdText.withValues(alpha: 0.8),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
         ],
@@ -267,9 +457,14 @@ class _Header extends StatelessWidget {
 }
 
 class _SectionCard extends StatelessWidget {
-  const _SectionCard({required this.section, required this.onCopy});
+  const _SectionCard({
+    required this.section,
+    required this.onLoad,
+    required this.onCopy,
+  });
 
   final AdbCommandSection section;
+  final ValueChanged<String> onLoad;
   final ValueChanged<String> onCopy;
 
   @override
@@ -285,7 +480,7 @@ class _SectionCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: BoxDecoration(
               color: AppColors.surfaceMuted,
               border: Border(bottom: BorderSide(color: AppColors.border)),
@@ -298,19 +493,15 @@ class _SectionCard extends StatelessWidget {
                   child: Text(
                     section.title,
                     style: TextStyle(
-                      fontSize: 16,
+                      fontSize: 15,
                       fontWeight: FontWeight.w500,
-                      letterSpacing: 0.15,
                       color: AppColors.textPrimary,
                     ),
                   ),
                 ),
                 Text(
                   '${section.items.length}',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppColors.textSecondary,
-                  ),
+                  style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
                 ),
               ],
             ),
@@ -324,6 +515,7 @@ class _SectionCard extends StatelessWidget {
                   _CommandBlock(
                     item: section.items[i],
                     commandColor: section.commandColor,
+                    onLoad: onLoad,
                     onCopy: onCopy,
                   ),
                 ],
@@ -340,11 +532,13 @@ class _CommandBlock extends StatefulWidget {
   const _CommandBlock({
     required this.item,
     required this.commandColor,
+    required this.onLoad,
     required this.onCopy,
   });
 
   final AdbCommandItem item;
   final Color commandColor;
+  final ValueChanged<String> onLoad;
   final ValueChanged<String> onCopy;
 
   @override
@@ -365,7 +559,7 @@ class _CommandBlockState extends State<_CommandBlock> {
           child: Material(
             color: Colors.transparent,
             child: InkWell(
-              onTap: () => widget.onCopy(widget.item.command),
+              onTap: () => widget.onLoad(widget.item.command),
               borderRadius: BorderRadius.circular(8),
               child: Container(
                 width: double.infinity,
@@ -392,13 +586,17 @@ class _CommandBlockState extends State<_CommandBlock> {
                     AnimatedOpacity(
                       opacity: _hovered ? 1 : 0,
                       duration: const Duration(milliseconds: 120),
-                      child: Padding(
-                        padding: EdgeInsets.only(left: 8),
-                        child: Icon(
+                      child: IconButton(
+                        tooltip: '复制',
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                        icon: Icon(
                           Icons.copy_rounded,
                           size: 14,
                           color: AppColors.textSecondary,
                         ),
+                        onPressed: () => widget.onCopy(widget.item.command),
                       ),
                     ),
                   ],
